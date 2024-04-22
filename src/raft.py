@@ -73,8 +73,11 @@ class Raft():
             self.change_role(RaftRole.FOLLOWER)
 
     def change_role(self, role: RaftRole):
+        #TODO: Reset variables
         match role:
             case RaftRole.LEADER:
+                self.nextIndex = {k: len(self.log) for k in self.node_ids if k != self.node_id}
+                self.matchIndex = {k: 0 for k in self.node_ids if k != self.node_id}
                 self.start_heartbeats()
                 self.cancel_timeout_check()
             case RaftRole.CANDIDATE:
@@ -84,6 +87,9 @@ class Raft():
             case RaftRole.FOLLOWER:
                 self.start_timeout_check()
                 self.cancel_heartbeats()
+
+    def heartbeat(self):
+        pass
 
     def start_heartbeats(self):
         pass
@@ -121,17 +127,69 @@ class Raft():
 
         return len(self.log) <= lastLogIndex
 
+    def conflicts(self, entry: object, index: int) -> bool:
+        return index < len(self.log) and self.log[index].term != entry.term
+
+    def append_log(self, entry: object) -> bool:
+        new = entry not in self.log
+
+        if new:
+            self.log.append(entry)
+
+        return new
+
+    def setCommitIndex(self, index: int):
+        self.commitIndex = index
+
+        while self.lastApplied < index:
+            self.lastApplied += 1
+            self.kv_store.apply(self.log[self.lastApplied])
+
+
     def append_entries(self, msg: any):
-        pass
+        self.check_term(msg.body.term)
+
+        if msg.body.term < self.currentTerm:
+            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            return
+
+        if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
+            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            return
+
+        for i, entry in enumerate(msg.body.entries):
+            if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
+                self.log = self.log[:msg.body.prevLogIndex + i + 1]
+
+        lastNew = 9223372036854775807
+        for i, entry in enumerate(msg.body.entries):
+            new = self.append_log(entry)
+            if new:
+                lastNew = msg.body.prevLogIndex + i + 1
+
+        if msg.body.leaderCommit > self.commitIndex:
+            self.setCommitIndex(min(msg.body.leaderCommit, lastNew))
+        
+        reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
+
+
 
     def append_entries_reply(self, msg: any):
-        pass
+        self.check_term(msg.body.term)
+        
+        if msg.body.success:
+            self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
+            self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
+        else:
+            self.nextIndex[msg.src] -= 1
+            reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
 
     def request_vote(self, msg: any):
         self.check_term(msg.body.term)
 
         if msg.body.term < self.currentTerm:
             reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
+            return
 
         voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
@@ -139,7 +197,13 @@ class Raft():
         reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
 
     def request_vote_reply(self, msg: any):
-        pass
+        self.check_term(msg.body.term)
+
+        if msg.body.voteGranted:
+            self.votedForMe.add(msg.src)
+
+        if len(self.votedForMe) >= self.node_count // 2:
+            self.change_role(RaftRole.LEADER)
 
 
 raft = Raft()
