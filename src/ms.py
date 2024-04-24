@@ -5,8 +5,24 @@ from sys import stdin
 from json import loads, dumps
 from types import SimpleNamespace as sn
 from os import _exit
+from dataclasses import dataclass
+from typing import TypeAlias, Any
 
 msg_id = 0
+
+
+
+
+Body: TypeAlias = dict[str, Any]
+
+
+@dataclass
+class Message:
+    src: str
+    dest: str
+    body: Body
+
+
 
 def send(src, dest, **body):
     global msg_id

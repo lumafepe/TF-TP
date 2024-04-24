@@ -2,15 +2,14 @@
 
 import logging
 from key_value import KVStore
-from threading import Lock, Condition, Thread
+from threading import Thread
 from time import sleep
 from enum import Enum
 from time import time
 from log import Log
-from sched import scheduler
 from random import uniform
 from queue import Queue
-from ms import receiveAll, reply, send
+from ms import receiveAll, reply, send, Message
 
 logging.getLogger().setLevel(logging.DEBUG)
 
@@ -30,7 +29,7 @@ class Raft():
         #TODO: Make persistent
         self.currentTerm = 0
         self.votedFor = None
-        self.log = [Log({}, 0)]
+        self.log = [Log(None, 0, 0)]
 
         self.commitIndex = 0
         self.lastApplied = 0
@@ -40,13 +39,11 @@ class Raft():
         self.electionTimer = time()
 
         # Leader only
-        self.nextIndex = []
-        self.matchIndex = []
+        self.nextIndex = {}
+        self.matchIndex = {}
         self.leaderId = -1
 
-        self.heartbeat_condition = Condition()
         self.heartbeat_running = False
-        self.election_timeout_condition = Condition()
         self.election_timeout_running = True
 
         heartbeat_thread = Thread(target=self.heartbeat_thread)
@@ -67,23 +64,21 @@ class Raft():
                 self.change_role(RaftRole.CANDIDATE)
 
     def set_election_timer_running(self, value: bool):
-        with self.election_timeout_condition:
-            self.election_timeout_running = value
+        self.election_timeout_running = value
 
     def set_election_timer(self, timer: float):
         self.electionTimer = time()
 
     def set_heartbeat_running(self, value: bool):
-        with self.heartbeat_condition:
-            self.heartbeat_running = value
+        self.heartbeat_running = value
 
-    def init(self, msg: any):
+    def init(self, msg: Message):
         self.node_id = msg.body.node_id
         self.node_ids = msg.body.node_ids
         self.node_count = len(self.node_ids)
         reply(msg, type='init_ok')
 
-    def read(self, msg: any):
+    def read(self, msg: Message):
         value = self.kv_store.read(msg.body.key)
 
         if value is None:
@@ -91,44 +86,50 @@ class Raft():
         else:
             reply(msg, type='read_ok', value=value)
 
-    def write(self, msg: any):
+    def write(self, msg: Message):
         self.kv_store.write(msg.body.key, getattr(msg.body, 'value'))
         reply(msg, type='write_ok')
 
-    def cas(self, msg: any):
+    def cas(self, msg: Message) -> bool:
         _from = getattr(msg.body, 'from')
         matches = self.kv_store.cas(msg.body.key, _from, msg.body.to)
 
         if matches is None:
             reply(msg, type='error', code=20)
+            return False
         elif not matches:
             reply(msg, type='error', code=22)
+            return False
         else:
             reply(msg, type='cas_ok')
+            return True
 
 
-    def fromClient(self, msg: any, append: bool = True):
-        logging.debug(f"From Client 1 {msg.body.type} {self.node_id} {self.leaderId}")
+    def fromClient(self, msg: Message, append: bool = True):
+        last_log_index = len(self.log) - 1
         if self.node_id == self.leaderId:
-            logging.debug("From Client 1.1")
             match msg.body.type:
                 case 'read':
                     self.read(msg)
                 case 'write':
                     self.write(msg)
+                    self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
                 case 'cas':
-                    self.cas(msg)
+                    if self.cas(msg):
+                         self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
+
+            self.compute_majority()
+
+            for node in self.node_ids:
+                if node != self.node_id and last_log_index >= self.nextIndex[node]:
+                    send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
+
         elif self.leaderId != -1:
-            logging.debug("From Client 1.2")
             kwargs = vars(msg.body)
             del kwargs["msg_id"]
             send(msg.src, self.leaderId, **kwargs)
         elif append:
-            logging.debug("From Client 1.3")
             self.backlog.append(msg)
-        logging.debug("From Client 2")
-
-
 
 
     def check_term(self, term: int):
@@ -168,7 +169,7 @@ class Raft():
         self.set_election_timer_running(False)
 
     def start_election(self):
-        logging.debug("Starting election")
+        logging.info("Starting election")
         self.currentTerm += 1
         self.votedFor = self.node_id
 
@@ -206,12 +207,43 @@ class Raft():
     def setCommitIndex(self, index: int):
         self.commitIndex = index
 
-        while self.lastApplied < index:
+        while self.lastApplied < index and self.lastApplied < len(self.log) - 1:
             self.lastApplied += 1
             self.kv_store.apply(self.log[self.lastApplied])
 
+    def majority_index(self) -> int:
+        left = 0
+        right = len(self.log) - 1
 
-    def append_entries(self, msg: any):
+        for i in range(0, right + 1):
+            if self.log[i].term == self.currentTerm:
+                left = i
+                break
+
+        while left < right:
+            mid = (left + right) // 2
+
+            count = 0
+            for node in self.node_ids:
+                if node == self.node_id:
+                    continue
+                if self.matchIndex[node] >= mid:
+                    count += 1
+
+            if count >= (self.node_count + 1) // 2:
+                left = mid
+            else:
+                right = mid - 1
+
+        return left
+
+
+    def compute_majority(self):
+        majority = self.majority_index()
+        if majority > self.commitIndex:
+            self.setCommitIndex(majority)
+
+    def append_entries(self, msg: Message):
         self.check_term(msg.body.term)
         self.set_election_timer(time())
         if msg.body.term < self.currentTerm:
@@ -241,7 +273,7 @@ class Raft():
 
 
 
-    def append_entries_reply(self, msg: any):
+    def append_entries_reply(self, msg: Message):
         self.check_term(msg.body.term)
         
         if msg.body.success:
@@ -251,39 +283,30 @@ class Raft():
             self.nextIndex[msg.src] -= 1
             reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
 
-    def request_vote(self, msg: any):
-        logging.debug("Request vote begin")
+    def request_vote(self, msg: Message):
         self.set_election_timer(time())
-        logging.debug("Request vote 1")
         self.check_term(msg.body.term)
-        logging.debug("Request vote 2")
+
         if msg.body.term < self.currentTerm:
-            logging.debug("Request vote 2.5")
             reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
-            logging.debug("Request vote end")
             return
 
-        logging.debug("Request vote 3")
         voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
-        logging.debug("Request vote 4")
+
         if voteGranted:
             self.votedFor = msg.src
-        logging.debug("Request vote 5")
-        reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
-        logging.debug("Request vote end")
 
-    def request_vote_reply(self, msg: any):
-        logging.debug("RPCReply")
+        reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
+
+    def request_vote_reply(self, msg: Message):
         self.check_term(msg.body.term)
 
         if msg.body.voteGranted:
-            logging.debug(f"Granted {len(self.votedForMe)} {self.node_count}")
             self.votedForMe.add(msg.src)
 
         if len(self.votedForMe) >= (self.node_count + 1) // 2:
             self.change_role(RaftRole.LEADER)
-            logging.debug("Elected")
 
 queue = Queue()
 raft = Raft()
@@ -291,33 +314,26 @@ raft = Raft()
 def election_probe():
     while True:
         queue.put("election")
-        logging.debug("Election")
         sleep(uniform(0.05, 0.15))
 
 def heartbeat_probe():
     while True:
         queue.put("hearbeat")
-        logging.debug("Heartbeat")
         sleep(uniform(0.05, 0.15))
 
 
 def process():
     timeout = uniform(0.25, 0.75)
     while True:
-        logging.debug("Process 1")
         msg = queue.get()
-        logging.debug("Process 2")
 
         if msg == "election":
             raft.election_thread(timeout, None)
-            logging.debug("Process 3")
             continue
         elif msg == "hearbeat":
             raft.heartbeat_thread()
-            logging.debug("Process 3")
             continue
 
-        logging.debug(msg)
         match msg.body.type:
             case 'init':
                 raft.init(msg)
@@ -331,13 +347,12 @@ def process():
                 raft.request_vote_reply(msg)
             case _:
                 raft.fromClient(msg)
-        logging.debug("Process 3")
-    logging.debug("Process over")
+
 
 def main():
     for msg in receiveAll():
         queue.put(msg)
-        logging.debug("Receive")
+
 
 hello_thread = Thread(target=process)
 hello_thread.start()
