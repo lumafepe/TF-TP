@@ -9,6 +9,7 @@ from time import time
 from log import Log
 from sched import scheduler
 from random import uniform
+from queue import Queue
 from ms import receiveAll, reply, send
 
 logging.getLogger().setLevel(logging.DEBUG)
@@ -55,30 +56,21 @@ class Raft():
         heartbeat_thread.start()
         
     def heartbeat_thread(self):
-        while True:
-            with self.heartbeat_condition:
-                while not self.heartbeat_running:
-                    self.heartbeat_condition.wait()
-        
-            sleep(0.04)
+        if self.heartbeat_running: 
             for node in self.node_ids:
                 if node != self.node_id:
                     send(self.node_id, node, type='AppendEntriesRPC',  ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=[],leaderCommit=self.commitIndex)
     
-    def election_thread(self, timeout, sch):
+    def election_thread(self, timeout, executor):
         if self.election_timeout_running:
             if(time() - self.electionTimer >= timeout):
                 self.change_role(RaftRole.CANDIDATE)
-        sch.enter(uniform(0.150, 0.300), 1, lambda: self.election_thread(timeout, sch))
-        sch.run(blocking=False)
-
 
     def set_election_timer_running(self, value: bool):
         with self.election_timeout_condition:
             self.election_timeout_running = value
 
     def set_election_timer(self, timer: float):
-        logging.info("Timer set")
         self.electionTimer = time()
 
     def set_heartbeat_running(self, value: bool):
@@ -115,8 +107,10 @@ class Raft():
             reply(msg, type='cas_ok')
 
 
-    def fromClient(self, msg: any):
+    def fromClient(self, msg: any, append: bool = True):
+        logging.debug("From Client 1")
         if self.node_id == self.leaderId:
+            logging.debug("From Client 1.1")
             match msg.body.type:
                 case 'read':
                     self.read(msg)
@@ -125,9 +119,14 @@ class Raft():
                 case 'cas':
                     self.cas(msg)
         elif self.leaderId != -1:
-            send(msg.src, self.leaderId, body=msg.body)
-        else:
+            logging.debug("From Client 1.2")
+            kwargs = vars(msg.body)
+            del kwargs["msg_id"]
+            send(msg.src, self.leaderId, **kwargs)
+        elif append:
+            logging.debug("From Client 1.3")
             self.backlog.append(msg)
+        logging.debug("From Client 2")
 
 
 
@@ -150,7 +149,7 @@ class Raft():
                 self.cancel_heartbeats()
             case RaftRole.FOLLOWER:
                 for msg in self.backlog:
-                    self.fromClient(msg)
+                    self.fromClient(msg, append=False)
                 self.backlog = []
                 self.start_timeout_check()
                 self.cancel_heartbeats()
@@ -188,7 +187,6 @@ class Raft():
             return True
 
         if self.log[-1].term > lastLogTerm:
-            logging.info(f"Failing {self.currentTerm} > {lastLogTerm}")
             return False
 
         return len(self.log) <= lastLogIndex
@@ -253,57 +251,102 @@ class Raft():
             reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
 
     def request_vote(self, msg: any):
-        logging.debug("Received")
-        logging.debug("Term checked")
+        logging.debug("Request vote begin")
         self.set_election_timer(time())
+        logging.debug("Request vote 1")
         self.check_term(msg.body.term)
-        logging.debug("Timer")
-
-        logging.info("Aqui1")
+        logging.debug("Request vote 2")
         if msg.body.term < self.currentTerm:
-            logging.info("Aqui2")
+            logging.debug("Request vote 2.5")
             reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
+            logging.debug("Request vote end")
             return
 
-        logging.info("Aqui3")
-        logging.info(f"{self.votedFor} {msg.body.candidateId} {msg.body.lastLogIndex} {msg.body.lastLogTerm}")
+        logging.debug("Request vote 3")
         voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
-
+        logging.debug("Request vote 4")
         if voteGranted:
             self.votedFor = msg.src
-
+        logging.debug("Request vote 5")
         reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
+        logging.debug("Request vote end")
 
     def request_vote_reply(self, msg: any):
+        logging.debug("RPCReply")
         self.check_term(msg.body.term)
 
         if msg.body.voteGranted:
+            logging.debug(f"Granted {len(self.votedForMe)} {self.node_count}")
             self.votedForMe.add(msg.src)
 
-        if len(self.votedForMe) >= self.node_count // 2:
+        if len(self.votedForMe) >= (self.node_count + 1) // 2:
             self.change_role(RaftRole.LEADER)
+            logging.debug("Elected")
 
-
+queue = Queue()
 raft = Raft()
-sch = scheduler(time, sleep)
 
-def process(msg):
-    match msg.body.type:
-        case 'init':
-            raft.init(msg)
-        case 'AppendEntriesRPC':
-            raft.append_entries(msg)
-        case 'AppendEntriesRPCReply':
-            raft.append_entries_reply(msg)
-        case 'RequestVoteRPC':
-            raft.request_vote(msg)
-        case 'RequestVoteRPCReply':
-            raft.request_vote_reply(msg)
-        case _:
-            raft.fromClient(msg)
+def election_probe():
+    while True:
+        queue.put("election")
+        logging.debug("Election")
+        sleep(uniform(0.05, 0.15))
 
-sch.enter(uniform(0.075, 0.15), 1, lambda: raft.election_thread(uniform(0.35, 0.75), sch))
-for msg in receiveAll():
-    sch.enter(0, 1, lambda: process(msg))
-    sch.run(blocking=False)
+def heartbeat_probe():
+    while True:
+        queue.put("hearbeat")
+        logging.debug("Heartbeat")
+        sleep(uniform(0.05, 0.15))
+
+
+def process():
+    timeout = uniform(0.25, 0.75)
+    while True:
+        logging.debug("Process 1")
+        msg = queue.get()
+        logging.debug("Process 2")
+
+        if msg == "election":
+            raft.election_thread(timeout, None)
+            logging.debug("Process 3")
+            continue
+        elif msg == "hearbeat":
+            raft.heartbeat_thread()
+            logging.debug("Process 3")
+            continue
+
+        logging.debug(msg)
+        match msg.body.type:
+            case 'init':
+                raft.init(msg)
+            case 'AppendEntriesRPC':
+                raft.append_entries(msg)
+            case 'AppendEntriesRPCReply':
+                raft.append_entries_reply(msg)
+            case 'RequestVoteRPC':
+                raft.request_vote(msg)
+            case 'RequestVoteRPCReply':
+                raft.request_vote_reply(msg)
+            case _:
+                raft.fromClient(msg)
+        logging.debug("Process 3")
+    logging.debug("Process over")
+
+def main():
+    for msg in receiveAll():
+        queue.put(msg)
+        logging.debug("Receive")
+
+hello_thread = Thread(target=process)
+hello_thread.start()
+hello_thread2 = Thread(target=election_probe)
+hello_thread2.start()
+hello_thread3 = Thread(target=heartbeat_probe)
+hello_thread3.start()
+hello_thread4 = Thread(target=main)
+hello_thread4.start()
+
+hello_thread4.join()
+
+queue.task_done()
