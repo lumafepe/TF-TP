@@ -108,7 +108,7 @@ class Raft():
 
 
     def fromClient(self, msg: any, append: bool = True):
-        logging.debug("From Client 1")
+        logging.debug(f"From Client 1 {msg.body.type} {self.node_id} {self.leaderId}")
         if self.node_id == self.leaderId:
             logging.debug("From Client 1.1")
             match msg.body.type:
@@ -139,6 +139,7 @@ class Raft():
     def change_role(self, role: RaftRole):
         match role:
             case RaftRole.LEADER:
+                self.leaderId = self.node_id
                 self.nextIndex = {k: len(self.log) for k in self.node_ids if k != self.node_id}
                 self.matchIndex = {k: 0 for k in self.node_ids if k != self.node_id}
                 self.start_heartbeats()
