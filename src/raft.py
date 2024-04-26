@@ -106,8 +106,10 @@ class Raft():
 
 
     def fromClient(self, msg: Message, append: bool = True):
+        logging.debug("From Client")
         last_log_index = len(self.log) - 1
         if self.node_id == self.leaderId:
+            logging.debug("Leader")
             match msg.body.type:
                 case 'read':
                     self.read(msg)
@@ -125,10 +127,12 @@ class Raft():
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
         elif self.leaderId != -1:
+            logging.debug("Not leader")
             kwargs = vars(msg.body)
             del kwargs["msg_id"]
             send(msg.src, self.leaderId, **kwargs)
         elif append:
+            logging.debug("Backlog")
             self.backlog.append(msg)
 
 
@@ -205,9 +209,10 @@ class Raft():
         return new
 
     def setCommitIndex(self, index: int):
-        self.commitIndex = index
+        logging.debug(f"Commit Index from {self.commitIndex} to {index}. Last applied {self.lastApplied}. Log length {len(self.log)}")
+        self.commitIndex = min(index, len(self.log) - 1)
 
-        while self.lastApplied < index and self.lastApplied < len(self.log) - 1:
+        while self.lastApplied < self.commitIndex:
             self.lastApplied += 1
             self.kv_store.apply(self.log[self.lastApplied])
 
@@ -231,11 +236,11 @@ class Raft():
                     count += 1
 
             if count >= (self.node_count + 1) // 2:
-                left = mid
+                left = mid + 1
             else:
-                right = mid - 1
+                right = mid
 
-        return left
+        return max(left, 0)
 
 
     def compute_majority(self):
@@ -323,7 +328,7 @@ def heartbeat_probe():
 
 
 def process():
-    timeout = uniform(0.25, 0.75)
+    timeout = uniform(0.55, 1.75)
     while True:
         msg = queue.get()
 
