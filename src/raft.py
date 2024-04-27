@@ -106,10 +106,8 @@ class Raft():
 
 
     def fromClient(self, msg: Message, append: bool = True):
-        logging.debug("From Client")
         last_log_index = len(self.log) - 1
         if self.node_id == self.leaderId:
-            logging.debug("Leader")
             match msg.body.type:
                 case 'read':
                     self.read(msg)
@@ -127,10 +125,12 @@ class Raft():
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
         elif self.leaderId != -1:
-            logging.debug("Not leader")
             kwargs = vars(msg.body)
             del kwargs["msg_id"]
-            send(msg.src, self.leaderId, **kwargs)
+            if self.leaderId != self.node_id:
+                send(msg.src, self.leaderId, **kwargs)
+            else:
+                self.fromClient(msg)
         elif append:
             logging.debug("Backlog")
             self.backlog.append(msg)
@@ -147,6 +147,7 @@ class Raft():
                 self.leaderId = self.node_id
                 self.nextIndex = {k: len(self.log) for k in self.node_ids if k != self.node_id}
                 self.matchIndex = {k: 0 for k in self.node_ids if k != self.node_id}
+                self.clear_backlog()
                 self.start_heartbeats()
                 self.cancel_timeout_check()
             case RaftRole.CANDIDATE:
@@ -154,9 +155,7 @@ class Raft():
                 self.start_timeout_check()
                 self.cancel_heartbeats()
             case RaftRole.FOLLOWER:
-                for msg in self.backlog:
-                    self.fromClient(msg, append=False)
-                self.backlog = []
+                self.clear_backlog()
                 self.start_timeout_check()
                 self.cancel_heartbeats()
 
@@ -208,8 +207,19 @@ class Raft():
 
         return new
 
+    def clear_backlog(self):
+        logging.debug("Clearing backlog")
+        if self.leaderId != -1:
+            logging.debug("Actually clearing")
+            for msg in self.backlog:
+                kwargs = vars(msg.body)
+                del kwargs["msg_id"]
+                send(msg.src, self.leaderId, **kwargs)
+            self.backlog = []
+                
+
+
     def setCommitIndex(self, index: int):
-        logging.debug(f"Commit Index from {self.commitIndex} to {index}. Last applied {self.lastApplied}. Log length {len(self.log)}")
         self.commitIndex = min(index, len(self.log) - 1)
 
         while self.lastApplied < self.commitIndex:
@@ -256,6 +266,7 @@ class Raft():
             return
         
         self.leaderId = msg.src
+        self.clear_backlog()
 
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
             reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
