@@ -24,6 +24,7 @@ class Message:
 
 
 
+
 def send(src, dest, **body):
     global msg_id
     data = dumps(sn(dest=dest, src=src, body=sn(msg_id=(msg_id:=msg_id+1), **body)), default=vars)
