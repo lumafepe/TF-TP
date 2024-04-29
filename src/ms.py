@@ -24,6 +24,10 @@ class Message:
 
 
 
+def forward(src, dest, body):
+    data = dumps(sn(dest=dest, src=src, body=body))
+    logging.debug("sending %s", data)
+    print(data, flush=True)
 
 def send(src, dest, **body):
     global msg_id

@@ -10,7 +10,7 @@ from log import Log
 from random import uniform, shuffle
 from queue import Queue
 from math import log2
-from ms import receiveAll, reply, send, Message
+from ms import receiveAll, reply, send, forward, Message
 
 logging.getLogger().setLevel(logging.DEBUG)
 
@@ -133,10 +133,8 @@ class Raft():
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC = True)
 
         elif self.leaderId != -1:
-            kwargs = vars(msg.body)
-            del kwargs["msg_id"]
             if self.leaderId != self.node_id:
-                send(msg.src, self.leaderId, **kwargs)
+                forward(msg.src, self.leaderId, msg.body)
             else:
                 self.fromClient(msg)
         elif append:
@@ -220,11 +218,7 @@ class Raft():
 
     def gossip(self, msg: Message):
         for i in range(self.fanout):
-            logging.debug(f"{self.node_permutation}, {(self.c + i) % (self.node_count - 1)} {self.c} {i} {self.node_count}")
-            logging.debug(f"{self.node_permutation[(self.c + i) % (self.node_count - 1)]}")
-            kwargs = vars(msg.body)
-            del kwargs["msg_id"]
-            send(msg.src, self.node_permutation[(self.c + i) % (self.node_count - 1)], **kwargs)
+            forward(msg.src, self.node_permutation[(self.c + i) % (self.node_count - 1)], msg.body)
         self.c += self.fanout
         self.c %= (self.node_count - 1)
 
@@ -242,9 +236,7 @@ class Raft():
         if self.leaderId != -1:
             logging.debug("Actually clearing")
             for msg in self.backlog:
-                kwargs = vars(msg.body)
-                del kwargs["msg_id"]
-                send(msg.src, self.leaderId, **kwargs)
+                forward(msg.src, self.leaderId, msg.body)
             self.backlog = []
                 
 
