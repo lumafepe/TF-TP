@@ -35,6 +35,9 @@ def send(src, dest, **body):
     logging.debug("sending %s", data)
     print(data, flush=True)
 
+def reply_to(request, src, id, **body):
+    send(src, request.src, in_reply_to=id, **body)
+
 def reply(request, **body):
     send(request.dest, request.src, in_reply_to=request.body.msg_id, **body)
 
