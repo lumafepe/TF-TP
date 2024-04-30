@@ -125,19 +125,24 @@ class Raft():
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
         elif self.leaderId != -1:
-            kwargs = vars(msg.body)
-            del kwargs["msg_id"]
             if self.leaderId != self.node_id:
-                send(msg.src, self.leaderId, **kwargs)
+                logging.debug("Forward")
+                send(self.node_id, self.leaderId, type="Forward", og=msg)
             else:
                 self.fromClient(msg)
         elif append:
             logging.debug("Backlog")
             self.backlog.append(msg)
 
+    def forward(self, msg: Message):
+        logging.debug("Forwarded")
+        msg.dest = self.node_id
+        self.fromClient(msg.body.og)
+
 
     def check_term(self, term: int):
         if(term > self.currentTerm):
+            self.votedFor = None
             self.currentTerm = term
             self.change_role(RaftRole.FOLLOWER)
 
@@ -212,9 +217,8 @@ class Raft():
         if self.leaderId != -1:
             logging.debug("Actually clearing")
             for msg in self.backlog:
-                kwargs = vars(msg.body)
-                del kwargs["msg_id"]
-                send(msg.src, self.leaderId, **kwargs)
+                logging.debug("Forward")
+                send(self.node_id, self.leaderId, type="Forward", og=msg)
             self.backlog = []
                 
 
@@ -304,12 +308,14 @@ class Raft():
         self.check_term(msg.body.term)
 
         if msg.body.term < self.currentTerm:
+            logging.debug(f"Wrong term {msg.body.term} {self.currentTerm}")
             reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
             return
 
         voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
 
+        logging.debug(f"{self.votedFor} {msg.body.candidateId} {self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)}")
         if voteGranted:
             self.votedFor = msg.src
 
@@ -361,6 +367,8 @@ def process():
                 raft.request_vote(msg)
             case 'RequestVoteRPCReply':
                 raft.request_vote_reply(msg)
+            case 'Forward':
+                raft.forward(msg)
             case _:
                 raft.fromClient(msg)
 
