@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from ms import Message
 
 class Log:
@@ -7,6 +8,12 @@ class Log:
         self.data = {}
         if message is not None:
             self.__process_message__(message)
+
+    @staticmethod
+    def from_namespace(namespace: SimpleNamespace) -> "Log":
+        log = Log(None, namespace.term, namespace.id)
+        log.data = vars(namespace.data)
+        return log
 
     def __process_message__(self, message: Message):
         self.data["type"] = message.body.type
@@ -19,6 +26,12 @@ class Log:
                 self.data["key"] = message.body.key
                 self.data["from"] = getattr(message.body, "from")
                 self.data["to"] = message.body.to
-    
+
     def __eq__(self, other: "Log") -> bool:
         return type(self) == type(other) and self.data == other.data and self.term == other.term and self.id == other.id
+
+    def __str__(self) -> str:
+        return str(vars(self))
+
+    def __repr__(self) -> str:
+        return str(self)
