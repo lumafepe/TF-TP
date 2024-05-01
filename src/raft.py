@@ -19,7 +19,7 @@ class RaftRole(Enum):
     FOLLOWER = 3
 
 class Raft():
-    def __init__(self):
+    def __init__(self) -> None:
         self.node_id = -1
         self.node_ids = []
         self.node_count = 0
@@ -52,33 +52,34 @@ class Raft():
 
         heartbeat_thread.start()
         
-    def heartbeat_thread(self):
+    def heartbeat_thread(self) -> None:
+        logging.info(vars(self.kv_store))
         if self.heartbeat_running: 
             for node in self.node_ids:
                 if node != self.node_id:
                     send(self.node_id, node, type='AppendEntriesRPC',  ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=[],leaderCommit=self.commitIndex)
     
-    def election_thread(self, timeout, executor):
+    def election_thread(self, timeout, executor) -> None:
         if self.election_timeout_running:
             if(time() - self.electionTimer >= timeout):
                 self.change_role(RaftRole.CANDIDATE)
 
-    def set_election_timer_running(self, value: bool):
+    def set_election_timer_running(self, value: bool) -> None:
         self.election_timeout_running = value
 
-    def set_election_timer(self, timer: float):
+    def set_election_timer(self, timer: float) -> None:
         self.electionTimer = time()
 
-    def set_heartbeat_running(self, value: bool):
+    def set_heartbeat_running(self, value: bool) -> None:
         self.heartbeat_running = value
 
-    def init(self, msg: Message):
+    def init(self, msg: Message) -> None:
         self.node_id = msg.body.node_id
         self.node_ids = msg.body.node_ids
         self.node_count = len(self.node_ids)
         reply(msg, type='init_ok')
 
-    def read(self, msg: Message):
+    def read(self, msg: Message) -> None:
         value = self.kv_store.read(msg.body.key)
 
         if value is None:
@@ -86,7 +87,7 @@ class Raft():
         else:
             reply(msg, type='read_ok', value=value)
 
-    def write(self, msg: Message):
+    def write(self, msg: Message) -> None:
         self.kv_store.write(msg.body.key, getattr(msg.body, 'value'))
         reply(msg, type='write_ok')
 
@@ -105,7 +106,7 @@ class Raft():
             return True
 
 
-    def fromClient(self, msg: Message, append: bool = True):
+    def fromClient(self, msg: Message, append: bool = True) -> None:
         last_log_index = len(self.log) - 1
         if self.node_id == self.leaderId:
             match msg.body.type:
@@ -134,19 +135,19 @@ class Raft():
             logging.debug("Backlog")
             self.backlog.append(msg)
 
-    def forward(self, msg: Message):
+    def forward(self, msg: Message) -> None:
         logging.debug("Forwarded")
         msg.dest = self.node_id
         self.fromClient(msg.body.og)
 
 
-    def check_term(self, term: int):
+    def check_term(self, term: int) -> None:
         if(term > self.currentTerm):
             self.votedFor = None
             self.currentTerm = term
             self.change_role(RaftRole.FOLLOWER)
 
-    def change_role(self, role: RaftRole):
+    def change_role(self, role: RaftRole) -> None:
         match role:
             case RaftRole.LEADER:
                 self.leaderId = self.node_id
@@ -164,19 +165,19 @@ class Raft():
                 self.start_timeout_check()
                 self.cancel_heartbeats()
 
-    def start_heartbeats(self):
+    def start_heartbeats(self) -> None:
         self.set_heartbeat_running(True)
 
-    def cancel_heartbeats(self):
+    def cancel_heartbeats(self) -> None:
         self.set_heartbeat_running(False)
 
-    def start_timeout_check(self):
+    def start_timeout_check(self) -> None:
         self.set_election_timer_running(True)
 
-    def cancel_timeout_check(self):
+    def cancel_timeout_check(self) -> None:
         self.set_election_timer_running(False)
 
-    def start_election(self):
+    def start_election(self) -> None:
         logging.info("Starting election")
         self.currentTerm += 1
         self.votedFor = self.node_id
@@ -206,13 +207,12 @@ class Raft():
 
     def append_log(self, entry: Log) -> bool:
         new = entry not in self.log
-
         if new:
             self.log.append(entry)
 
         return new
 
-    def clear_backlog(self):
+    def clear_backlog(self) -> None:
         logging.debug("Clearing backlog")
         if self.leaderId != -1:
             logging.debug("Actually clearing")
@@ -223,7 +223,7 @@ class Raft():
                 
 
 
-    def setCommitIndex(self, index: int):
+    def setCommitIndex(self, index: int) -> None:
         self.commitIndex = min(index, len(self.log) - 1)
 
         while self.lastApplied < self.commitIndex:
@@ -276,12 +276,15 @@ class Raft():
             reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
 
-        for i, entry in enumerate(msg.body.entries):
+        entries = list(map(lambda e: Log.from_namespace(e), msg.body.entries))
+
+        for i, entry in enumerate(entries):
             if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
                 self.log = self.log[:msg.body.prevLogIndex + i + 1]
 
         lastNew = 9223372036854775807
-        for i, entry in enumerate(msg.body.entries):
+        logging.debug(f"{self.log} {msg.body.entries} {entries}")
+        for i, entry in enumerate(entries):
             new = self.append_log(entry)
             if new:
                 lastNew = msg.body.prevLogIndex + i + 1
@@ -376,6 +379,7 @@ def process():
 def main():
     for msg in receiveAll():
         queue.put(msg)
+    logging.debug("End")
 
 
 hello_thread = Thread(target=process)
