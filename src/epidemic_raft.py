@@ -301,18 +301,14 @@ class Raft():
             send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
 
-        logging.debug(f"Answer {msg.body.leaderRound} {self.roundLC} {not msg.body.isRPC}")
         if msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
             return
-
-        logging.debug(f"Gossip {not msg.body.isRPC}")
         
         if not msg.body.isRPC:
             self.gossip(msg)
             self.roundLC = msg.body.leaderRound
-            
+
         self.leaderId = msg.body.leaderId
-        logging.debug(f"Leader {self.leaderId}")
         self.clear_backlog()
 
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
