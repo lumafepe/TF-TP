@@ -20,7 +20,7 @@ class RaftRole(Enum):
     FOLLOWER = 3
 
 class Raft():
-    def __init__(self):
+    def __init__(self) -> None:
         self.node_id = -1
         self.node_ids = []
         self.node_count = 0
@@ -57,7 +57,7 @@ class Raft():
 
         heartbeat_thread.start()
         
-    def heartbeat_thread(self):
+    def heartbeat_thread(self) -> None:
         if self.heartbeat_running: 
             self.roundLC += 1
             self.gossip_kwargs(type='AppendEntriesRPC',  ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=0, prevLogTerm=0, entries=[],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=False)
@@ -112,6 +112,11 @@ class Raft():
             reply(msg, type='cas_ok')
             return True
 
+    def forward(self, msg: Message):
+        logging.debug("Forwarded")
+        msg.dest = self.node_id
+        self.fromClient(msg.body.og)
+
 
     def fromClient(self, msg: Message, append: bool = True):
         last_log_index = len(self.log) - 1
@@ -134,7 +139,7 @@ class Raft():
 
         elif self.leaderId != -1:
             if self.leaderId != self.node_id:
-                forward(msg.src, self.leaderId, msg.body)
+                send(self.node_id, self.leaderId, type="Forward", og=msg)
             else:
                 self.fromClient(msg)
         elif append:
@@ -145,6 +150,7 @@ class Raft():
     def check_term(self, term: int):
         if(term > self.currentTerm):
             self.currentTerm = term
+            self.votedFor = None
             self.roundLC = 0
             self.change_role(RaftRole.FOLLOWER)
 
@@ -218,7 +224,10 @@ class Raft():
 
     def gossip(self, msg: Message):
         for i in range(self.fanout):
-            forward(msg.src, self.node_permutation[(self.c + i) % (self.node_count - 1)], msg.body)
+            body = vars(msg.body)
+            if "msg_id" in body:
+                del body["msg_id"]
+            send(self.node_id, self.node_permutation[(self.c + i) % (self.node_count - 1)], **body)
         self.c += self.fanout
         self.c %= (self.node_count - 1)
 
@@ -227,7 +236,7 @@ class Raft():
         for i in range(self.fanout):
             logging.debug(f"{self.node_permutation}, {(self.c + i) % (self.node_count - 1)} {self.c} {i} {self.node_count}")
             logging.debug(f"{self.node_permutation[(self.c + i) % (self.node_count - 1)]}")
-            send(self.leaderId, self.node_permutation[(self.c + i) % (self.node_count - 1)], **body)
+            send(self.node_id, self.node_permutation[(self.c + i) % (self.node_count - 1)], **body)
         self.c += self.fanout
         self.c %= (self.node_count - 1)
 
@@ -236,7 +245,7 @@ class Raft():
         if self.leaderId != -1:
             logging.debug("Actually clearing")
             for msg in self.backlog:
-                forward(msg.src, self.leaderId, msg.body)
+                send(self.node_id, self.leaderId, type="Forward", og=msg)
             self.backlog = []
                 
 
@@ -281,34 +290,44 @@ class Raft():
             self.setCommitIndex(majority)
 
     def append_entries(self, msg: Message):
+        if self.leaderId == self.node_id:
+            return
+        
         needs_reply = msg.body.leaderRound > self.roundLC or msg.body.isRPC
 
         self.check_term(msg.body.term)
         self.set_election_timer(time())
         if msg.body.term < self.currentTerm:
-            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
 
+        logging.debug(f"Answer {msg.body.leaderRound} {self.roundLC} {not msg.body.isRPC}")
         if msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
             return
+
+        logging.debug(f"Gossip {not msg.body.isRPC}")
         
         if not msg.body.isRPC:
+            self.gossip(msg)
             self.roundLC = msg.body.leaderRound
-
-        self.leaderId = msg.src
+            
+        self.leaderId = msg.body.leaderId
+        logging.debug(f"Leader {self.leaderId}")
         self.clear_backlog()
 
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
             if needs_reply:
-                reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+                send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
+        
+        entries = list(map(lambda e: Log.from_namespace(e), msg.body.entries))
 
-        for i, entry in enumerate(msg.body.entries):
+        for i, entry in enumerate(entries):
             if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
                 self.log = self.log[:msg.body.prevLogIndex + i + 1]
 
         lastNew = 9223372036854775807
-        for i, entry in enumerate(msg.body.entries):
+        for i, entry in enumerate(entries):
             new = self.append_log(entry)
             if new:
                 lastNew = msg.body.prevLogIndex + i + 1
@@ -317,7 +336,7 @@ class Raft():
             self.setCommitIndex(min(msg.body.leaderCommit, lastNew))
         
         if needs_reply:
-            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
+            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
 
 
 
@@ -393,6 +412,8 @@ def process():
                 raft.request_vote(msg)
             case 'RequestVoteRPCReply':
                 raft.request_vote_reply(msg)
+            case 'Forward':
+                raft.forward(msg)
             case _:
                 raft.fromClient(msg)
 
