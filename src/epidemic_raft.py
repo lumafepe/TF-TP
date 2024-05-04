@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, forward, Message
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -27,6 +27,9 @@ class Raft():
         self.kv_store = KVStore()
         self.role = RaftRole.FOLLOWER
         self.roundLC = 0
+        self.bitmap = []
+        self.nextCommit = 1
+        self.maxCommit = 0
 
         #TODO: Make persistent
         self.currentTerm = 0
@@ -59,10 +62,21 @@ class Raft():
         
     def heartbeat_thread(self) -> None:
         if self.heartbeat_running: 
+            # Cause leader to randomly fail
+            #if uniform(0, 1) >= 0.8 and self.currentTerm == 1:
+            #    exit(0)
             self.roundLC += 1
-            self.gossip_kwargs(type='AppendEntriesRPC',  ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=0, prevLogTerm=0, entries=[],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=False)
+            if self.commitIndex < len(self.log) - 1:
+                self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.commitIndex - 1, \
+                    prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
+                        isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
+            else:
+                self.gossip_kwargs(type='AppendEntriesRPC',  ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=0, prevLogTerm=0, \
+                    entries=[],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=False, bitmap=self.bitmap, \
+                        nextCommit=self.nextCommit, maxCommit=self.maxCommit)
     
     def election_thread(self, timeout, executor):
+        logging.info(self.kv_store.store)
         if self.election_timeout_running:
             if(time() - self.electionTimer >= timeout):
                 self.change_role(RaftRole.CANDIDATE)
@@ -81,7 +95,6 @@ class Raft():
         self.node_ids = msg.body.node_ids
         self.node_count = len(self.node_ids)
         self.fanout = round(log2(self.node_count))
-        logging.debug("INIT")
         self.node_permutation = [i for i in self.node_ids if i != self.node_id]
         shuffle(self.node_permutation)
         reply(msg, type='init_ok')
@@ -133,9 +146,10 @@ class Raft():
 
             self.compute_majority()
 
-            for node in self.node_ids:
-                if node != self.node_id and last_log_index >= self.nextIndex[node]:
-                    send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC = True)
+            self.roundLC += 1
+            self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.commitIndex - 1, \
+                    prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
+                        isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
 
         elif self.leaderId != -1:
             if self.leaderId != self.node_id:
@@ -147,11 +161,16 @@ class Raft():
             self.backlog.append(msg)
 
 
-    def check_term(self, term: int):
+    def set_term(self, term: int) -> None:
+        self.currentTerm = term
+        self.votedFor = None
+        self.roundLC = 0
+        self.nextCommit = self.maxCommit + 1
+        self.bitmap = [0 for i in self.node_ids]
+
+    def check_term(self, term: int) -> None:
         if(term > self.currentTerm):
-            self.currentTerm = term
-            self.votedFor = None
-            self.roundLC = 0
+            self.set_term(term)
             self.change_role(RaftRole.FOLLOWER)
 
     def change_role(self, role: RaftRole):
@@ -186,8 +205,8 @@ class Raft():
 
     def start_election(self):
         logging.info("Starting election")
-        self.currentTerm += 1
-        self.roundLC = 0
+        self.set_term(self.currentTerm + 1)
+        
         self.votedFor = self.node_id
 
         self.votedForMe = set()
@@ -209,6 +228,25 @@ class Raft():
             return False
 
         return len(self.log) <= lastLogIndex
+
+    def update(self, maxCommit: int, nextCommit: int, bitmap: list[int]) -> None:
+        if sum(self.bitmap) >= (self.node_count + 1) // 2:
+            self.maxCommit = self.nextCommit
+            self.bitmap = [0 for i in self.node_ids]
+            if self.nextCommit >= len(self.log) - 1 or self.log[-1].term != self.currentTerm:
+                self.nextCommit += 1
+            else:
+                self.nextCommit = len(self.log) - 1
+                self.bitmap[self.node_ids.index(self.node_id)] = 1
+
+
+    def merge(self, maxCommit: int, nextCommit: int, bitmap: list[int]) -> None:
+        self.maxCommit = max(self.maxCommit, maxCommit)
+        if self.nextCommit <= nextCommit:
+            self.bitmap = [a | b for a, b in zip(self.bitmap, bitmap)]
+        if self.nextCommit <= self.maxCommit:
+            self.bitmap = bitmap
+            self.nextCommit = nextCommit
 
     def conflicts(self, entry: Log, index: int) -> bool:
         return index < len(self.log) and self.log[index].term != entry.term
@@ -234,8 +272,6 @@ class Raft():
 
     def gossip_kwargs(self, **body: Message):
         for i in range(self.fanout):
-            logging.debug(f"{self.node_permutation}, {(self.c + i) % (self.node_count - 1)} {self.c} {i} {self.node_count}")
-            logging.debug(f"{self.node_permutation[(self.c + i) % (self.node_count - 1)]}")
             send(self.node_id, self.node_permutation[(self.c + i) % (self.node_count - 1)], **body)
         self.c += self.fanout
         self.c %= (self.node_count - 1)
@@ -284,28 +320,32 @@ class Raft():
         return max(left, 0)
 
 
-    def compute_majority(self):
+    def compute_majority(self) -> None:
         majority = self.majority_index()
         if majority > self.commitIndex:
             self.setCommitIndex(majority)
 
-    def append_entries(self, msg: Message):
-        if self.leaderId == self.node_id:
-            return
-        
-        needs_reply = msg.body.leaderRound > self.roundLC or msg.body.isRPC
-
+    def append_entries(self, msg: Message) -> None:
         self.check_term(msg.body.term)
-        self.set_election_timer(time())
         if msg.body.term < self.currentTerm:
             send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
 
+        self.set_election_timer(time())
+
+        if self.leaderId == self.node_id:
+            self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
+            return
+        else:
+            self.update(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
+        
         if msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
             return
+
+        needs_reply = msg.body.leaderRound > self.roundLC or msg.body.isRPC
+
         
         if not msg.body.isRPC:
-            self.gossip(msg)
             self.roundLC = msg.body.leaderRound
 
         self.leaderId = msg.body.leaderId
@@ -322,21 +362,25 @@ class Raft():
             if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
                 self.log = self.log[:msg.body.prevLogIndex + i + 1]
 
-        lastNew = 9223372036854775807
         for i, entry in enumerate(entries):
             new = self.append_log(entry)
-            if new:
-                lastNew = msg.body.prevLogIndex + i + 1
 
-        if msg.body.leaderCommit > self.commitIndex:
-            self.setCommitIndex(min(msg.body.leaderCommit, lastNew))
-        
-        if needs_reply:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
+        self.update(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
+
+        if self.currentTerm == self.log[-1].term:
+            self.setCommitIndex(max(len(self.log) - 1, self.maxCommit))
+
+        if self.nextCommit <= len(self.log) - 1 and self.log[self.nextCommit].term == self.currentTerm:
+            self.bitmap[self.node_ids.index(self.node_id)] = 1
+
+        if not msg.body.isRPC:
+            self.gossip_kwargs(type='AppendEntriesRPC', term=self.currentTerm, leaderId=self.leaderId, prevLogIndex=msg.body.prevLogIndex, \
+                prevLogTerm=msg.body.prevLogTerm, entries=msg.body.entries, leaderRound = self.roundLC, isRPC=False, bitmap=self.bitmap, \
+                    maxCommit = self.maxCommit, nextCommit = self.nextCommit)
 
 
 
-    def append_entries_reply(self, msg: Message):
+    def append_entries_reply(self, msg: Message) -> None:
         self.check_term(msg.body.term)
         
         if msg.body.success:
