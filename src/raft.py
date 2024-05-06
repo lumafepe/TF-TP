@@ -112,14 +112,8 @@ class Raft():
             match msg.body.type:
                 case 'read':
                     self.read(msg)
-                case 'write':
-                    self.write(msg)
+                case _:
                     self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
-                case 'cas':
-                    if self.cas(msg):
-                         self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
-
-            self.compute_majority()
 
             for node in self.node_ids:
                 if node != self.node_id and last_log_index >= self.nextIndex[node]:
@@ -228,7 +222,14 @@ class Raft():
 
         while self.lastApplied < self.commitIndex:
             self.lastApplied += 1
-            self.kv_store.apply(self.log[self.lastApplied])
+            if self.node_id == self.leaderId:
+                match self.log[self.lastApplied].message.body.type:
+                    case 'write':
+                        self.write(self.log[self.lastApplied].message)
+                    case 'cas':
+                        self.cas(self.log[self.lastApplied].message)
+            else:
+                self.kv_store.apply(self.log[self.lastApplied])
 
     def majority_index(self) -> int:
         left = 0
@@ -241,6 +242,7 @@ class Raft():
 
         while left < right:
             mid = (left + right) // 2
+            logging.info("Hello")
 
             count = 0
             for node in self.node_ids:
@@ -254,12 +256,13 @@ class Raft():
             else:
                 right = mid
 
-        return max(left, 0)
+        return max(left - 1, 0)
 
 
     def compute_majority(self):
         majority = self.majority_index()
         if majority > self.commitIndex:
+            logging.info(f"Majority: {majority}, {self.matchIndex}")
             self.setCommitIndex(majority)
 
     def append_entries(self, msg: Message):
@@ -300,6 +303,7 @@ class Raft():
         self.check_term(msg.body.term)
         
         if msg.body.success:
+            self.compute_majority()
             self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
             self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
         else:
