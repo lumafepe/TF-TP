@@ -36,6 +36,7 @@ class Log:
         """
         self.term = term
         self.id = id
+        self.message = message
         self.data = {}
         if message is not None:
             self.__process_message__(message)
