@@ -10,9 +10,9 @@ from log import Log
 from random import uniform, shuffle
 from queue import Queue
 from math import log2
-from ms import receiveAll, reply, send, forward, Message
+from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -67,7 +67,7 @@ class Raft():
             #    exit(0)
             self.roundLC += 1
             if self.commitIndex < len(self.log) - 1:
-                self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.commitIndex - 1, \
+                self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
                     prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
                         isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
             else:
@@ -137,17 +137,12 @@ class Raft():
             match msg.body.type:
                 case 'read':
                     self.read(msg)
-                case 'write':
-                    self.write(msg)
+                case _:
                     self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
-                case 'cas':
-                    if self.cas(msg):
-                         self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
-
-            self.compute_majority()
+   
 
             self.roundLC += 1
-            self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.commitIndex - 1, \
+            self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
                     prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
                         isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
 
@@ -232,6 +227,7 @@ class Raft():
     def update(self, maxCommit: int, nextCommit: int, bitmap: list[int]) -> None:
         if sum(self.bitmap) >= (self.node_count + 1) // 2:
             self.maxCommit = self.nextCommit
+            self.setCommitIndex(self.maxCommit)
             self.bitmap = [0 for i in self.node_ids]
             if self.nextCommit >= len(self.log) - 1 or self.log[-1].term != self.currentTerm:
                 self.nextCommit += 1
@@ -242,6 +238,7 @@ class Raft():
 
     def merge(self, maxCommit: int, nextCommit: int, bitmap: list[int]) -> None:
         self.maxCommit = max(self.maxCommit, maxCommit)
+        self.setCommitIndex(self.maxCommit)
         if self.nextCommit <= nextCommit:
             self.bitmap = [a | b for a, b in zip(self.bitmap, bitmap)]
         if self.nextCommit <= self.maxCommit:
@@ -287,43 +284,22 @@ class Raft():
 
 
     def setCommitIndex(self, index: int):
+        if index == self.commitIndex:
+            return
+        
         self.commitIndex = min(index, len(self.log) - 1)
 
         while self.lastApplied < self.commitIndex:
             self.lastApplied += 1
-            self.kv_store.apply(self.log[self.lastApplied])
-
-    def majority_index(self) -> int:
-        left = 0
-        right = len(self.log) - 1
-
-        for i in range(0, right + 1):
-            if self.log[i].term == self.currentTerm:
-                left = i
-                break
-
-        while left < right:
-            mid = (left + right) // 2
-
-            count = 0
-            for node in self.node_ids:
-                if node == self.node_id:
-                    continue
-                if self.matchIndex[node] >= mid:
-                    count += 1
-
-            if count >= (self.node_count + 1) // 2:
-                left = mid + 1
+            if self.node_id == self.leaderId:
+                match self.log[self.lastApplied].message.body.type:
+                    case 'write':
+                        self.write(self.log[self.lastApplied].message)
+                    case 'cas':
+                        self.cas(self.log[self.lastApplied].message)
             else:
-                right = mid
+                self.kv_store.apply(self.log[self.lastApplied])
 
-        return max(left, 0)
-
-
-    def compute_majority(self) -> None:
-        majority = self.majority_index()
-        if majority > self.commitIndex:
-            self.setCommitIndex(majority)
 
     def append_entries(self, msg: Message) -> None:
         self.check_term(msg.body.term)
@@ -333,13 +309,11 @@ class Raft():
 
         self.set_election_timer(time())
 
+        self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
+
         if self.leaderId == self.node_id:
-            self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
-            return
-        else:
             self.update(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
-        
-        if msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
+        elif msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
             return
 
         needs_reply = msg.body.leaderRound > self.roundLC or msg.body.isRPC
@@ -351,6 +325,7 @@ class Raft():
         self.leaderId = msg.body.leaderId
         self.clear_backlog()
 
+        logging.info(f"{len(self.log)} {msg.body.prevLogIndex}")
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
             if needs_reply:
                 send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
@@ -374,6 +349,7 @@ class Raft():
             self.bitmap[self.node_ids.index(self.node_id)] = 1
 
         if not msg.body.isRPC:
+            self.roundLC += 1
             self.gossip_kwargs(type='AppendEntriesRPC', term=self.currentTerm, leaderId=self.leaderId, prevLogIndex=msg.body.prevLogIndex, \
                 prevLogTerm=msg.body.prevLogTerm, entries=msg.body.entries, leaderRound = self.roundLC, isRPC=False, bitmap=self.bitmap, \
                     maxCommit = self.maxCommit, nextCommit = self.nextCommit)
@@ -388,7 +364,12 @@ class Raft():
             self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
         else:
             self.nextIndex[msg.src] -= 1
-            reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=True)
+            reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, \
+                  leaderId=self.node_id, prevLogIndex=max(self.nextIndex[msg.src] - 1, 0), \
+                    prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, \
+                        entries=self.log[self.nextIndex[msg.src]:], \
+                            leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=True, \
+                                nextCommit=self.nextCommit, maxCommit=self.maxCommit, bitmap=self.bitmap)
 
     def request_vote(self, msg: Message):
         self.set_election_timer(time())
