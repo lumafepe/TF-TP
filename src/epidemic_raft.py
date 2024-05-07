@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -34,7 +34,7 @@ class Raft():
         #TODO: Make persistent
         self.currentTerm = 0
         self.votedFor = None
-        self.log = [Log(None, 0, 0)]
+        self.log = [Log(None, 1, 0)]
 
         self.commitIndex = 0
         self.lastApplied = 0
@@ -76,7 +76,7 @@ class Raft():
                         nextCommit=self.nextCommit, maxCommit=self.maxCommit)
     
     def election_thread(self, timeout, executor):
-        logging.info(self.kv_store.store)
+        logging.info(f"KV {self.kv_store.store}")
         if self.election_timeout_running:
             if(time() - self.electionTimer >= timeout):
                 self.change_role(RaftRole.CANDIDATE)
