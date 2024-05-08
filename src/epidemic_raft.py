@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -45,6 +45,7 @@ class Raft():
         # Implementation only
         self.votedForMe = set()
         self.electionTimer = time()
+        self.lastHeartbeat = time()
 
         # Leader only
         self.nextIndex = {}
@@ -61,10 +62,11 @@ class Raft():
         heartbeat_thread.start()
         
     def heartbeat_thread(self) -> None:
-        if self.heartbeat_running: 
+        if self.heartbeat_running and time() - self.lastHeartbeat >= 0.1: 
             # Cause leader to randomly fail
             #if uniform(0, 1) >= 0.8 and self.currentTerm == 1:
             #    exit(0)
+            self.lastHeartbeat = time()
             self.roundLC += 1
             if self.commitIndex < len(self.log) - 1:
                 self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
@@ -142,15 +144,13 @@ class Raft():
    
 
             self.roundLC += 1
+            self.lastHeartbeat = time()
             self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
                     prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
                         isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
 
         elif self.leaderId != -1:
-            if self.leaderId != self.node_id:
-                send(self.node_id, self.leaderId, type="Forward", og=msg)
-            else:
-                self.fromClient(msg)
+            send(self.node_id, self.leaderId, type="Forward", og=msg)
         elif append:
             logging.debug("Backlog")
             self.backlog.append(msg)
@@ -307,14 +307,14 @@ class Raft():
             send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
 
-        self.set_election_timer(time())
-
         self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
 
         if self.leaderId == self.node_id:
             self.update(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
         elif msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
             return
+
+        self.set_election_timer(time())
 
         needs_reply = msg.body.leaderRound > self.roundLC or msg.body.isRPC
 
@@ -349,7 +349,6 @@ class Raft():
             self.bitmap[self.node_ids.index(self.node_id)] = 1
 
         if not msg.body.isRPC:
-            self.roundLC += 1
             self.gossip_kwargs(type='AppendEntriesRPC', term=self.currentTerm, leaderId=self.leaderId, prevLogIndex=msg.body.prevLogIndex, \
                 prevLogTerm=msg.body.prevLogTerm, entries=msg.body.entries, leaderRound = self.roundLC, isRPC=False, bitmap=self.bitmap, \
                     maxCommit = self.maxCommit, nextCommit = self.nextCommit)
@@ -410,49 +409,55 @@ def heartbeat_probe():
         sleep(uniform(0.05, 0.15))
 
 
-def process():
+def process(msg):
     timeout = uniform(0.55, 1.75)
-    while True:
-        msg = queue.get()
+    #while True:
+    logging.debug(msg)
+    if msg == "election":
+        raft.election_thread(timeout, None)
+        return
+    elif msg == "heartbeat":
+        raft.heartbeat_thread()
+        return
 
-        if msg == "election":
-            raft.election_thread(timeout, None)
-            continue
-        elif msg == "hearbeat":
-            raft.heartbeat_thread()
-            continue
-
-        match msg.body.type:
-            case 'init':
-                raft.init(msg)
-            case 'AppendEntriesRPC':
-                raft.append_entries(msg)
-            case 'AppendEntriesRPCReply':
-                raft.append_entries_reply(msg)
-            case 'RequestVoteRPC':
-                raft.request_vote(msg)
-            case 'RequestVoteRPCReply':
-                raft.request_vote_reply(msg)
-            case 'Forward':
-                raft.forward(msg)
-            case _:
-                raft.fromClient(msg)
-
-
-def main():
-    for msg in receiveAll():
-        queue.put(msg)
+    match msg.body.type:
+        case 'init':
+            raft.init(msg)
+        case 'AppendEntriesRPC':
+            raft.append_entries(msg)
+        case 'AppendEntriesRPCReply':
+            raft.append_entries_reply(msg)
+        case 'RequestVoteRPC':
+            raft.request_vote(msg)
+        case 'RequestVoteRPCReply':
+            raft.request_vote_reply(msg)
+        case 'Forward':
+            raft.forward(msg)
+        case _:
+            raft.fromClient(msg)
 
 
-hello_thread = Thread(target=process)
-hello_thread.start()
-hello_thread2 = Thread(target=election_probe)
-hello_thread2.start()
-hello_thread3 = Thread(target=heartbeat_probe)
-hello_thread3.start()
-hello_thread4 = Thread(target=main)
-hello_thread4.start()
+# def main():
+#     for msg in receiveAll():
+#         queue.put(msg)
 
-hello_thread4.join()
 
-queue.task_done()
+# hello_thread = Thread(target=process)
+# hello_thread.start()
+# hello_thread2 = Thread(target=election_probe)
+# hello_thread2.start()
+# hello_thread3 = Thread(target=heartbeat_probe)
+# hello_thread3.start()
+# hello_thread4 = Thread(target=main)
+# hello_thread4.start()
+
+# hello_thread4.join()
+
+# queue.task_done()
+
+for msg in receiveAll():
+    if msg is not None:
+        process(msg)
+    process("heartbeat")
+    process("election")
+    sleep(0.001)
