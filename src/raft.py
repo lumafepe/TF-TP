@@ -37,6 +37,7 @@ class Raft():
         # Implementation only
         self.votedForMe = set()
         self.electionTimer = time()
+        self.lastHeartbeat = time()
 
         # Leader only
         self.nextIndex = {}
@@ -54,7 +55,8 @@ class Raft():
         
     def heartbeat_thread(self) -> None:
         logging.info(vars(self.kv_store))
-        if self.heartbeat_running: 
+        if self.heartbeat_running and time() - self.lastHeartbeat >= 0.1:
+            self.lastHeartbeat = time() 
             for node in self.node_ids:
                 if node != self.node_id:
                     send(self.node_id, node, type='AppendEntriesRPC',  ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=[],leaderCommit=self.commitIndex)
@@ -115,16 +117,14 @@ class Raft():
                 case _:
                     self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
 
-            for node in self.node_ids:
-                if node != self.node_id and last_log_index >= self.nextIndex[node]:
-                    send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
+                    self.lastHeartbeat = time()
+                    for node in self.node_ids:
+                        if node != self.node_id and last_log_index >= self.nextIndex[node]:
+                            send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
         elif self.leaderId != -1:
-            if self.leaderId != self.node_id:
-                logging.debug("Forward")
-                send(self.node_id, self.leaderId, type="Forward", og=msg)
-            else:
-                self.fromClient(msg)
+            logging.debug("Forward")
+            send(self.node_id, self.leaderId, type="Forward", og=msg)
         elif append:
             logging.debug("Backlog")
             self.backlog.append(msg)
