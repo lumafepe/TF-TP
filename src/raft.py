@@ -54,7 +54,6 @@ class Raft():
         heartbeat_thread.start()
         
     def heartbeat_thread(self) -> None:
-        logging.info(vars(self.kv_store))
         if self.heartbeat_running and time() - self.lastHeartbeat >= 0.1:
             self.lastHeartbeat = time() 
             for node in self.node_ids:
@@ -123,14 +122,11 @@ class Raft():
                             send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
         elif self.leaderId != -1:
-            logging.debug("Forward")
             send(self.node_id, self.leaderId, type="Forward", og=msg)
         elif append:
-            logging.debug("Backlog")
             self.backlog.append(msg)
 
     def forward(self, msg: Message) -> None:
-        logging.debug("Forwarded")
         msg.dest = self.node_id
         self.fromClient(msg.body.og)
 
@@ -139,6 +135,7 @@ class Raft():
         if(term > self.currentTerm):
             self.votedFor = None
             self.currentTerm = term
+            self.leaderId = -1
             self.change_role(RaftRole.FOLLOWER)
 
     def change_role(self, role: RaftRole) -> None:
@@ -207,11 +204,8 @@ class Raft():
         return new
 
     def clear_backlog(self) -> None:
-        logging.debug("Clearing backlog")
         if self.leaderId != -1:
-            logging.debug("Actually clearing")
             for msg in self.backlog:
-                logging.debug("Forward")
                 send(self.node_id, self.leaderId, type="Forward", og=msg)
             self.backlog = []
                 
@@ -242,7 +236,6 @@ class Raft():
 
         while left < right:
             mid = (left + right) // 2
-            logging.info("Hello")
 
             count = 0
             for node in self.node_ids:
@@ -262,7 +255,6 @@ class Raft():
     def compute_majority(self):
         majority = self.majority_index()
         if majority > self.commitIndex:
-            logging.info(f"Majority: {majority}, {self.matchIndex}")
             self.setCommitIndex(majority)
 
     def append_entries(self, msg: Message):
@@ -286,7 +278,6 @@ class Raft():
                 self.log = self.log[:msg.body.prevLogIndex + i + 1]
 
         lastNew = 9223372036854775807
-        logging.debug(f"{self.log} {msg.body.entries} {entries}")
         for i, entry in enumerate(entries):
             new = self.append_log(entry)
             if new:
@@ -306,23 +297,22 @@ class Raft():
             self.compute_majority()
             self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
             self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
-        else:
+        elif self.role == RaftRole.LEADER:
             self.nextIndex[msg.src] -= 1
             reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
 
     def request_vote(self, msg: Message):
+        logging.info("Request Vote Received")
         self.set_election_timer(time())
         self.check_term(msg.body.term)
 
         if msg.body.term < self.currentTerm:
-            logging.debug(f"Wrong term {msg.body.term} {self.currentTerm}")
             reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
             return
 
         voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
 
-        logging.debug(f"{self.votedFor} {msg.body.candidateId} {self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)}")
         if voteGranted:
             self.votedFor = msg.src
 
@@ -351,50 +341,55 @@ def heartbeat_probe():
         sleep(uniform(0.05, 0.15))
 
 
-def process():
+
+def process(msg):
     timeout = uniform(0.55, 1.75)
-    while True:
-        msg = queue.get()
 
-        if msg == "election":
-            raft.election_thread(timeout, None)
-            continue
-        elif msg == "hearbeat":
-            raft.heartbeat_thread()
-            continue
+    if msg == "election":
+        raft.election_thread(timeout, None)
+        return
+    elif msg == "heartbeat":
+        raft.heartbeat_thread()
+        return
 
-        match msg.body.type:
-            case 'init':
-                raft.init(msg)
-            case 'AppendEntriesRPC':
-                raft.append_entries(msg)
-            case 'AppendEntriesRPCReply':
-                raft.append_entries_reply(msg)
-            case 'RequestVoteRPC':
-                raft.request_vote(msg)
-            case 'RequestVoteRPCReply':
-                raft.request_vote_reply(msg)
-            case 'Forward':
-                raft.forward(msg)
-            case _:
-                raft.fromClient(msg)
+    match msg.body.type:
+        case 'init':
+            raft.init(msg)
+        case 'AppendEntriesRPC':
+            raft.append_entries(msg)
+        case 'AppendEntriesRPCReply':
+            raft.append_entries_reply(msg)
+        case 'RequestVoteRPC':
+            raft.request_vote(msg)
+        case 'RequestVoteRPCReply':
+            raft.request_vote_reply(msg)
+        case 'Forward':
+            raft.forward(msg)
+        case _:
+            raft.fromClient(msg)
 
 
-def main():
-    for msg in receiveAll():
-        queue.put(msg)
-    logging.debug("End")
+# def main():
+#     for msg in receiveAll():
+#         queue.put(msg)
 
 
-hello_thread = Thread(target=process)
-hello_thread.start()
-hello_thread2 = Thread(target=election_probe)
-hello_thread2.start()
-hello_thread3 = Thread(target=heartbeat_probe)
-hello_thread3.start()
-hello_thread4 = Thread(target=main)
-hello_thread4.start()
+# hello_thread = Thread(target=process)
+# hello_thread.start()
+# hello_thread2 = Thread(target=election_probe)
+# hello_thread2.start()
+# hello_thread3 = Thread(target=heartbeat_probe)
+# hello_thread3.start()
+# hello_thread4 = Thread(target=main)
+# hello_thread4.start()
 
-hello_thread4.join()
+# hello_thread4.join()
 
-queue.task_done()
+# queue.task_done()
+
+for msg in receiveAll():
+    if msg is not None:
+        process(msg)
+    process("heartbeat")
+    process("election")
+    sleep(0.001)
