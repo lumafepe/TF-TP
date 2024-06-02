@@ -27,51 +27,48 @@ class Raft():
         self.role = RaftRole.FOLLOWER
 
         #TODO: Make persistent
-        self.currentTerm = 0
-        self.votedFor = None
-        self.log = [Log(None, 0, 0)]
+        self.currentTerm = 0         # Latest term server has seen
+        self.votedFor = None         # CandidateId that received vote in current term
+        self.log = [Log(None, 0, 0)] # Artificial log entry so that Indexes start at 1
 
-        self.commitIndex = 0
-        self.lastApplied = 0
+        self.commitIndex = 0         # Index of highest log entry known to be committed
+        self.lastApplied = 0         # Index of highest log entry applied to state machine
 
         # Implementation only
-        self.votedForMe = set()
-        self.electionTimer = time()
+        self.votedForMe = set()      # Set of nodes that voted for me
+        self.electionTimer = time()  # Timer for election timeout
 
         # Leader only
-        self.nextIndex = {}
-        self.matchIndex = {}
-        self.leaderId = -1
+        self.nextIndex = {}          # For each server, index of the next log entry to send to that server
+        self.matchIndex = {}         # For each server, index of highest log entry known to be replicated on server
+        self.leaderId = -1           # Current leader
 
-        self.heartbeat_running = False
+        # To activate or deactivate the heartbeat and election threads
+        self.heartbeat_running = False          
         self.election_timeout_running = True
 
-        heartbeat_thread = Thread(target=self.heartbeat_thread)
-
-        self.backlog = []
-
-        heartbeat_thread.start()
-        
-    def heartbeat_thread(self) -> None:
-        logging.info(vars(self.kv_store))
-        if self.heartbeat_running: 
-            for node in self.node_ids:
-                if node != self.node_id:
-                    send(self.node_id, node, type='AppendEntriesRPC',  ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=[],leaderCommit=self.commitIndex)
-    
-    def election_thread(self, timeout, executor) -> None:
-        if self.election_timeout_running:
-            if(time() - self.electionTimer >= timeout):
-                self.change_role(RaftRole.CANDIDATE)
+        self.backlog = []           # Entries received when there is no leader
 
     def set_election_timer_running(self, value: bool) -> None:
         self.election_timeout_running = value
 
-    def set_election_timer(self, timer: float) -> None:
+    def set_election_timer(self) -> None:
         self.electionTimer = time()
 
     def set_heartbeat_running(self, value: bool) -> None:
         self.heartbeat_running = value
+        
+    def start_heartbeats(self) -> None:
+        self.set_heartbeat_running(True)
+        
+    def cancel_heartbeats(self) -> None:
+        self.set_heartbeat_running(False)
+
+    def start_timeout_check(self) -> None:
+        self.set_election_timer_running(True)
+
+    def cancel_timeout_check(self) -> None:
+        self.set_election_timer_running(False)
 
     def init(self, msg: Message) -> None:
         self.node_id = msg.body.node_id
@@ -105,43 +102,62 @@ class Raft():
             reply(msg, type='cas_ok')
             return True
 
-
-    def fromClient(self, msg: Message, append: bool = True) -> None:
-        last_log_index = len(self.log) - 1
-        if self.node_id == self.leaderId:
+    # When receiving message from client
+    def fromClient(self, msg: Message) -> None:
+        new_entry_index = len(self.log) # index of the new entry
+        
+        # When we are the leader
+        if self.role == RaftRole.LEADER:
             match msg.body.type:
                 case 'read':
                     self.read(msg)
                 case _:
-                    self.log.append(Log(msg, self.currentTerm, last_log_index + 1))
-
-            for node in self.node_ids:
+                    self.log.append(Log(msg, self.currentTerm, new_entry_index))
+            
+            # Could also send immediate append entries to followers to reduce latency
+            """
+             for node in self.node_ids:
                 if node != self.node_id and last_log_index >= self.nextIndex[node]:
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
-
+            """
+        
+        # When we are not the leader, but we know a leader
         elif self.leaderId != -1:
-            if self.leaderId != self.node_id:
-                logging.debug("Forward")
-                send(self.node_id, self.leaderId, type="Forward", og=msg)
-            else:
-                self.fromClient(msg)
-        elif append:
+            send(self.node_id, self.leaderId, type="Forward", og=msg)
+        
+        # When we don't know the leader  
+        else: 
             logging.debug("Backlog")
             self.backlog.append(msg)
 
     def forward(self, msg: Message) -> None:
-        logging.debug("Forwarded")
         msg.dest = self.node_id
+        
+        # Treat the message as if it came from the client
         self.fromClient(msg.body.og)
+        
+    def heartbeat_thread(self) -> None:
+        if self.heartbeat_running: 
+            for node in self.node_ids:
+                if node != self.node_id:
+                    # In a heartbeat, we send to the follower entries we think are missing
+                    send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
 
+    def election_thread(self, timeout) -> None:
+        if self.election_timeout_running:
+            if(time() - self.electionTimer >= timeout):
+                self.change_role(RaftRole.CANDIDATE)
 
     def check_term(self, term: int) -> None:
+        # E se receber uma mensagem de um líder com o mesmo termo enquanto é candidato?
         if(term > self.currentTerm):
             self.votedFor = None
             self.currentTerm = term
             self.change_role(RaftRole.FOLLOWER)
+            self.set_election_timer(time())
 
     def change_role(self, role: RaftRole) -> None:
+        self.role = role
         match role:
             case RaftRole.LEADER:
                 self.leaderId = self.node_id
@@ -149,7 +165,8 @@ class Raft():
                 self.matchIndex = {k: 0 for k in self.node_ids if k != self.node_id}
                 self.clear_backlog()
                 self.start_heartbeats()
-                self.cancel_timeout_check()
+                self.heartbeat_thread()     # Send a heartbeat to its followers
+                self.cancel_timeout_check() # Leader doesn't timeout election timer
             case RaftRole.CANDIDATE:
                 self.start_election()
                 self.start_timeout_check()
@@ -158,24 +175,17 @@ class Raft():
                 self.clear_backlog()
                 self.start_timeout_check()
                 self.cancel_heartbeats()
-
-    def start_heartbeats(self) -> None:
-        self.set_heartbeat_running(True)
-
-    def cancel_heartbeats(self) -> None:
-        self.set_heartbeat_running(False)
-
-    def start_timeout_check(self) -> None:
-        self.set_election_timer_running(True)
-
-    def cancel_timeout_check(self) -> None:
-        self.set_election_timer_running(False)
+                
+    # Send all entries saved in the backlog to the leader, if any
+    def clear_backlog(self) -> None:
+        if self.leaderId != -1:
+            for msg in self.backlog:
+                send(self.node_id, self.leaderId, type="Forward", og=msg)
+            self.backlog = []
 
     def start_election(self) -> None:
-        logging.info("Starting election")
         self.currentTerm += 1
         self.votedFor = self.node_id
-
         self.votedForMe = set()
         self.votedForMe.add(self.node_id)
 
@@ -186,39 +196,114 @@ class Raft():
             if node != self.node_id:
                 send(self.node_id, node, type='RequestVoteRPC', term=self.currentTerm, \
                     candidateId=self.node_id, lastLogIndex = len(self.log), lastLogTerm = self.log[-1].term)
+    
+    def request_vote(self, msg: Message):
+        self.check_term(msg.body.term) # If receiving message from a leader with a higher term, convert to follower
 
+        # If the candidate's term is less than the current term, it is rejected
+        if msg.body.term < self.currentTerm:
+            reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
+            return
+
+        # Vote is granted if:
+        # 1. Receiver hasn't voted for another candidate
+        # 2. Candidate's log is at least as up-to-date as receiver's log
+        voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
+            self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
+
+        if voteGranted:
+            self.votedFor = msg.src
+
+        reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
+
+    def request_vote_reply(self, msg: Message):
+        # Shouldn't proccess if not a candidate or if the term is different
+        if self.role != RaftRole.CANDIDATE or msg.body.term != self.currentTerm:
+            return
+
+        if msg.body.voteGranted:
+            self.votedForMe.add(msg.src)
+
+        # When the candidate receives votes from a majority of the servers, it becomes the leader
+        if len(self.votedForMe) >= (self.node_count + 1) // 2:
+            self.change_role(RaftRole.LEADER)
+
+    # True if candidate's log is at least as up-to-date as receiver's log, False otherwise
     def more_up_to_date(self, lastLogIndex : int, lastLogTerm : int) -> bool:
-        if self.currentTerm < lastLogTerm:
+        # If terms are different, the candidate with the most recent term wins
+        if self.log[-1].term < lastLogTerm:
             return True
 
         if self.log[-1].term > lastLogTerm:
             return False
 
+        # If terms are the same, the candidate with the longest log wins
         return len(self.log) <= lastLogIndex
 
+    def append_entries(self, msg: Message):
+        self.check_term(msg.body.term)
+        
+        # Message from an outdated leader -> ignore
+        if msg.body.term < self.currentTerm:
+            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            return
+        
+        # Received message from a valid leader -> reset election timer
+        self.set_election_timer(time())
+        
+        self.leaderId = msg.src
+        self.clear_backlog()
+        
+        # If log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm -> reject
+        if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
+            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            return
+
+        entries = list(map(lambda e: Log.from_namespace(e), msg.body.entries))
+
+        index = 0 # This is the index where the conflict occurs
+        for i, entry in enumerate(entries):
+            if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
+                # When a conflict is found, delete the conflicting entry and all that follow it
+                self.log = self.log[:msg.body.prevLogIndex + i + 1]
+                index = i+1
+                break
+
+        # Append new entries not already in the log
+        self.log = self.log + entries[index:]
+        
+        # If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+        if msg.body.leaderCommit > self.commitIndex:
+            self.setCommitIndex(min(msg.body.leaderCommit, len(self.log)-1))
+        
+        reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
+
+    def append_entries_reply(self, msg: Message):
+        # If received a reply (false) from a server with a higher term, convert to follower
+        self.check_term(msg.body.term)
+        
+        if msg.body.success and self.role == RaftRole.LEADER and msg.body.term == self.currentTerm:
+            self.compute_majority()
+            
+            # Next index is updated to the last entry the follower could add in his log
+            self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
+            self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
+        elif self.role == RaftRole.LEADER and msg.body.term == self.currentTerm:
+            self.nextIndex[msg.src] -= 1
+            reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
+    
+    # Check if there is a conflict in a given index
     def conflicts(self, entry: Log, index: int) -> bool:
+        # Conflict when:
+        # 1. The index is in the log
+        # and
+        # 2. The term of the entry in the index is different from the term of the entry to be inserted
         return index < len(self.log) and self.log[index].term != entry.term
 
-    def append_log(self, entry: Log) -> bool:
-        new = entry not in self.log
-        if new:
-            self.log.append(entry)
-
-        return new
-
-    def clear_backlog(self) -> None:
-        logging.debug("Clearing backlog")
-        if self.leaderId != -1:
-            logging.debug("Actually clearing")
-            for msg in self.backlog:
-                logging.debug("Forward")
-                send(self.node_id, self.leaderId, type="Forward", og=msg)
-            self.backlog = []
-                
-
-
     def setCommitIndex(self, index: int) -> None:
-        self.commitIndex = min(index, len(self.log) - 1)
+        if index < self.commitIndex:
+            return 
+        self.commitIndex = index
 
         while self.lastApplied < self.commitIndex:
             self.lastApplied += 1
@@ -235,6 +320,7 @@ class Raft():
         left = 0
         right = len(self.log) - 1
 
+        # Encontrar primeira entrada do termo atual
         for i in range(0, right + 1):
             if self.log[i].term == self.currentTerm:
                 left = i
@@ -242,7 +328,6 @@ class Raft():
 
         while left < right:
             mid = (left + right) // 2
-            logging.info("Hello")
 
             count = 0
             for node in self.node_ids:
@@ -258,84 +343,11 @@ class Raft():
 
         return max(left - 1, 0)
 
-
     def compute_majority(self):
         majority = self.majority_index()
         if majority > self.commitIndex:
             logging.info(f"Majority: {majority}, {self.matchIndex}")
             self.setCommitIndex(majority)
-
-    def append_entries(self, msg: Message):
-        self.check_term(msg.body.term)
-        self.set_election_timer(time())
-        if msg.body.term < self.currentTerm:
-            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
-            return
-        
-        self.leaderId = msg.src
-        self.clear_backlog()
-
-        if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
-            reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
-            return
-
-        entries = list(map(lambda e: Log.from_namespace(e), msg.body.entries))
-
-        for i, entry in enumerate(entries):
-            if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
-                self.log = self.log[:msg.body.prevLogIndex + i + 1]
-
-        lastNew = 9223372036854775807
-        logging.debug(f"{self.log} {msg.body.entries} {entries}")
-        for i, entry in enumerate(entries):
-            new = self.append_log(entry)
-            if new:
-                lastNew = msg.body.prevLogIndex + i + 1
-
-        if msg.body.leaderCommit > self.commitIndex:
-            self.setCommitIndex(min(msg.body.leaderCommit, lastNew))
-        
-        reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, ni=msg.body.ni, entries=msg.body.entries)
-
-
-
-    def append_entries_reply(self, msg: Message):
-        self.check_term(msg.body.term)
-        
-        if msg.body.success:
-            self.compute_majority()
-            self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
-            self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
-        else:
-            self.nextIndex[msg.src] -= 1
-            reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[msg.src] - 1, prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, entries=self.log[self.nextIndex[msg.src]:],leaderCommit=self.commitIndex)
-
-    def request_vote(self, msg: Message):
-        self.set_election_timer(time())
-        self.check_term(msg.body.term)
-
-        if msg.body.term < self.currentTerm:
-            logging.debug(f"Wrong term {msg.body.term} {self.currentTerm}")
-            reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = False)
-            return
-
-        voteGranted = (self.votedFor is None or self.votedFor == msg.body.candidateId) and \
-            self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
-
-        logging.debug(f"{self.votedFor} {msg.body.candidateId} {self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)}")
-        if voteGranted:
-            self.votedFor = msg.src
-
-        reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
-
-    def request_vote_reply(self, msg: Message):
-        self.check_term(msg.body.term)
-
-        if msg.body.voteGranted:
-            self.votedForMe.add(msg.src)
-
-        if len(self.votedForMe) >= (self.node_count + 1) // 2:
-            self.change_role(RaftRole.LEADER)
 
 queue = Queue()
 raft = Raft()
