@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -164,14 +164,14 @@ class Raft():
             self.roundLC += 1
             # While commitIndex < last log entry index periodically
             # send AppendEntries gossip round
-            #if self.commitIndex < len(self.log) - 1:
-            self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
-                prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex+1:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
-                    isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
-            #else:
-            #    self.gossip_kwargs(type='AppendEntriesRPC',  ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=len(self.log) - 1, prevLogTerm=self.log, \
-            #        entries=[],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=False, bitmap=self.bitmap, \
-            #            nextCommit=self.nextCommit, maxCommit=self.maxCommit)
+            if self.commitIndex < len(self.log) - 1:
+                self.gossip_kwargs(type='AppendEntriesRPC', ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=max(0,self.commitIndex - 1), \
+                    prevLogTerm=self.log[self.commitIndex - 1].term, entries=self.log[self.commitIndex+1:],leaderCommit=self.commitIndex, leaderRound=self.roundLC , \
+                        isRPC = False, bitmap=self.bitmap, nextCommit=self.nextCommit, maxCommit=self.maxCommit)
+            else:
+                self.gossip_kwargs(type='AppendEntriesRPC',  ni=0, term = self.currentTerm, leaderId=self.node_id, prevLogIndex=len(self.log) - 1, prevLogTerm=self.log, \
+                    entries=[],leaderCommit=self.commitIndex, leaderRound=self.roundLC, isRPC=False, bitmap=self.bitmap, \
+                        nextCommit=self.nextCommit, maxCommit=self.maxCommit)
     
     def election_thread(self, timeout):
         if self.election_timeout_running:
@@ -231,7 +231,7 @@ class Raft():
         for node in self.node_ids:
             if node != self.node_id:
                 send(self.node_id, node, type='RequestVoteRPC', term=self.currentTerm, \
-                    candidateId=self.node_id, lastLogIndex = len(self.log), lastLogTerm = self.log[-1].term)
+                    candidateId=self.node_id, lastLogIndex = len(self.log) - 1, lastLogTerm = self.log[-1].term)
     
     def request_vote(self, msg: Message):
         self.check_term(msg.body.term)
@@ -337,7 +337,7 @@ class Raft():
         
         # Message from an outdated leader -> ignore
         if msg.body.term < self.currentTerm:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
 
         self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
@@ -359,7 +359,7 @@ class Raft():
 
         # If log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm -> reject
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
+            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
         
         entries = list(map(lambda e: Log.from_namespace(e), msg.body.entries))
@@ -367,11 +367,13 @@ class Raft():
         index = 0 # This is the index where the conflict occurs
         for i, entry in enumerate(entries):
             if self.conflicts(entry, msg.body.prevLogIndex + i + 1):
+                logging.info("Conflict")
                 # When a conflict is found, delete the conflicting entry and all that follow it
                 self.log = self.log[:msg.body.prevLogIndex + i + 1]
                 index = i+1
                 break
 
+        logging.info(entries[index:])
         # Append new entries not already in the log
         self.log = self.log + entries[index:]
 
@@ -386,19 +388,20 @@ class Raft():
                 prevLogTerm=msg.body.prevLogTerm, entries=msg.body.entries, leaderRound = self.roundLC, isRPC=False, bitmap=self.bitmap, \
                     maxCommit = self.maxCommit, nextCommit = self.nextCommit)
         else:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = True)
+            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = True, lastLogIndex=len(self.log) - 1)
             
     def append_entries_reply(self, msg: Message) -> None:
         # If received a reply (false) from a server with a higher term, convert to follower
         self.check_term(msg.body.term)
         
-        if msg.body.success:
+        if msg.body.success and self.matchIndex[msg.src] < msg.body.lastLogIndex:
             # No need to compute majority, as that is done in a decentralized manner
             # Next index is updated to the last entry the follower could add in his log
-            self.nextIndex[msg.src]  = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries))
-            self.matchIndex[msg.src] = max(self.nextIndex[msg.src], msg.body.ni + len(msg.body.entries) - 1)
-        else:
-            self.nextIndex[msg.src] -= 1
+            self.nextIndex[msg.src]  = msg.body.lastLogIndex + 1
+            self.matchIndex[msg.src] = msg.body.lastLogIndex
+        elif not msg.body.success:
+            self.nextIndex[msg.src] = msg.body.lastLogIndex
+            logging.info(f"Next Index {msg.body.lastLogIndex} {len(self.log)}")
             reply(msg, type='AppendEntriesRPC', ni=self.nextIndex[msg.src], term = self.currentTerm, \
                   leaderId=self.node_id, prevLogIndex=max(self.nextIndex[msg.src] - 1, 0), \
                     prevLogTerm=self.log[self.nextIndex[msg.src] - 1].term, \
@@ -412,7 +415,7 @@ class Raft():
         # 1. The index is in the log
         # and
         # 2. The term of the entry in the index is different from the term of the entry to be inserted
-        return index < len(self.log) and self.log[index].term != entry.term
+        return index < len(self.log) and (self.log[index].term != entry.term or entry in self.log)
 
     def setCommitIndex(self, index: int):
         if index < self.commitIndex:
