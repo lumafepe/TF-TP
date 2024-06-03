@@ -7,6 +7,8 @@ Typical usage example:
 
 from log import Log
 from state_machine import StateMachine
+import logging
+logging.getLogger().setLevel(logging.DEBUG)
 
 class KVStore(StateMachine):
     """A simple key value store.
@@ -82,7 +84,8 @@ class KVStore(StateMachine):
         Args:
           log: The log entry to apply.
         """
-        if log is not None:
+        logging.debug(f"Applying log {log}")
+        if log is not None and log.id != 0:
             match log.data["type"]:
                 case "write":
                     self.write(log.data["key"], log.data["value"])

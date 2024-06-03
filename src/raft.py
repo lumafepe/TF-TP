@@ -127,7 +127,6 @@ class Raft():
         
         # When we don't know the leader  
         else: 
-            logging.debug("Backlog")
             self.backlog.append(msg)
 
     def forward(self, msg: Message) -> None:
@@ -149,12 +148,11 @@ class Raft():
                 self.change_role(RaftRole.CANDIDATE)
 
     def check_term(self, term: int) -> None:
-        # E se receber uma mensagem de um líder com o mesmo termo enquanto é candidato?
         if(term > self.currentTerm):
             self.votedFor = None
             self.currentTerm = term
             self.change_role(RaftRole.FOLLOWER)
-            self.set_election_timer(time())
+            self.set_election_timer()
 
     def change_role(self, role: RaftRole) -> None:
         self.role = role
@@ -189,7 +187,7 @@ class Raft():
         self.votedForMe = set()
         self.votedForMe.add(self.node_id)
 
-        self.set_election_timer(time())
+        self.set_election_timer()
 
         # Broadcast RequestVoteRPC
         for node in self.node_ids:
@@ -212,6 +210,7 @@ class Raft():
             self.more_up_to_date(msg.body.lastLogIndex, msg.body.lastLogTerm)
 
         if voteGranted:
+            self.set_election_timer()
             self.votedFor = msg.src
 
         reply(msg, type='RequestVoteRPCReply', term=self.currentTerm, voteGranted = voteGranted)
@@ -219,6 +218,7 @@ class Raft():
     def request_vote_reply(self, msg: Message):
         # Shouldn't proccess if not a candidate or if the term is different
         if self.role != RaftRole.CANDIDATE or msg.body.term != self.currentTerm:
+            self.check_term(msg.body.term)
             return
 
         if msg.body.voteGranted:
@@ -243,13 +243,16 @@ class Raft():
     def append_entries(self, msg: Message):
         self.check_term(msg.body.term)
         
+        if self.role == RaftRole.CANDIDATE and msg.body.term == self.currentTerm:
+            self.change_role(RaftRole.FOLLOWER)
+        
         # Message from an outdated leader -> ignore
         if msg.body.term < self.currentTerm:
             reply(msg, type='AppendEntriesRPCReply', term = self.currentTerm, success = False)
             return
         
         # Received message from a valid leader -> reset election timer
-        self.set_election_timer(time())
+        self.set_election_timer()
         
         self.leaderId = msg.src
         self.clear_backlog()
@@ -346,7 +349,6 @@ class Raft():
     def compute_majority(self):
         majority = self.majority_index()
         if majority > self.commitIndex:
-            logging.info(f"Majority: {majority}, {self.matchIndex}")
             self.setCommitIndex(majority)
 
 queue = Queue()
@@ -359,7 +361,7 @@ def election_probe():
 
 def heartbeat_probe():
     while True:
-        queue.put("hearbeat")
+        queue.put("heartbeat")
         sleep(uniform(0.05, 0.15))
 
 
@@ -369,9 +371,9 @@ def process():
         msg = queue.get()
 
         if msg == "election":
-            raft.election_thread(timeout, None)
+            raft.election_thread(timeout)
             continue
-        elif msg == "hearbeat":
+        elif msg == "heartbeat":
             raft.heartbeat_thread()
             continue
 
