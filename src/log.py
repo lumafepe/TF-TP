@@ -55,7 +55,7 @@ class Log:
         Returns:
           The log corresponding to the namespace
         """
-        log = Log(None, namespace.term, namespace.id)
+        log = Log(namespace.message, namespace.term, namespace.id)
         log.data = vars(namespace.data)
         return log
 
