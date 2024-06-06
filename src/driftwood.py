@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -123,14 +123,11 @@ class Raft():
         
         # When we are the leader
         if self.node_id == self.leaderId:
-            match msg.body.type:
-                case 'read':
-                    self.read(msg)
-                case _:
-                    self.log.append(Log(msg, self.currentTerm, new_entry_index))
-                    #logging.debug(f"Log: {self.log} {self.nextCommit} {self.bitmap} {self.maxCommit} {self.commitIndex}")
-                    if self.nextCommit <= len(self.log) - 1 and self.log[self.nextCommit].term == self.currentTerm:
-                        self.bitmap[self.node_ids.index(self.node_id)] = 1
+            self.log.append(Log(msg, self.currentTerm, new_entry_index))
+            #logging.debug(f"Log: {self.log} {self.nextCommit} {self.bitmap} {self.maxCommit} {self.commitIndex}")
+            if self.nextCommit <= len(self.log) - 1 and self.log[self.nextCommit].term == self.currentTerm:
+                self.bitmap[self.node_ids.index(self.node_id)] = 1
+                    
    
             # Could also send immediate append entries to followers to reduce latency
             """
@@ -204,6 +201,7 @@ class Raft():
                 self.heartbeat_thread()         # Send a heartbeat to its followers
                 self.cancel_timeout_check()     # Leader doesn't timeout election timer 
             case RaftRole.CANDIDATE:
+                self.leaderId = -1
                 self.start_election()
                 self.start_timeout_check()
                 self.cancel_heartbeats()
@@ -337,7 +335,7 @@ class Raft():
         
         # Message from an outdated leader -> ignore
         if msg.body.term < self.currentTerm:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
+            send(self.node_id, msg.body.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
 
         self.merge(msg.body.nextCommit, msg.body.maxCommit, msg.body.bitmap)
@@ -428,6 +426,8 @@ class Raft():
                 match self.log[self.lastApplied].message.body.type:
                     case 'write':
                         self.write(self.log[self.lastApplied].message)
+                    case 'read':
+                        self.read(self.log[self.lastApplied].message)
                     case 'cas':
                         self.cas(self.log[self.lastApplied].message)
             else:

@@ -108,11 +108,7 @@ class Raft():
         
         # When we are the leader
         if self.role == RaftRole.LEADER:
-            match msg.body.type:
-                case 'read':
-                    self.read(msg)
-                case _:
-                    self.log.append(Log(msg, self.currentTerm, new_entry_index))
+            self.log.append(Log(msg, self.currentTerm, new_entry_index))
             
             # Could also send immediate append entries to followers to reduce latency
             """
@@ -225,7 +221,7 @@ class Raft():
             self.votedForMe.add(msg.src)
 
         # When the candidate receives votes from a majority of the servers, it becomes the leader
-        if len(self.votedForMe) >= (self.node_count + 1) // 2:
+        if len(self.votedForMe) >= (self.node_count + 2) // 2:
             self.change_role(RaftRole.LEADER)
 
     # True if candidate's log is at least as up-to-date as receiver's log, False otherwise
@@ -314,6 +310,8 @@ class Raft():
                 match self.log[self.lastApplied].message.body.type:
                     case 'write':
                         self.write(self.log[self.lastApplied].message)
+                    case 'read':
+                        self.read(self.log[self.lastApplied].message)
                     case 'cas':
                         self.cas(self.log[self.lastApplied].message)
             else:
@@ -339,7 +337,7 @@ class Raft():
                 if self.matchIndex[node] >= mid:
                     count += 1
 
-            if count >= (self.node_count + 1) // 2:
+            if count >= (self.node_count + 2) // 2:
                 left = mid + 1
             else:
                 right = mid
