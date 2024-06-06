@@ -261,7 +261,7 @@ class Raft():
             self.votedForMe.add(msg.src)
             
         # When the candidate receives votes from a majority of the servers, it becomes the leader
-        if len(self.votedForMe) >= (self.node_count + 1) // 2:
+        if len(self.votedForMe) >= (self.node_count + 2) // 2:
             self.change_role(RaftRole.LEADER)
 
     # True if candidate's log is at least as up-to-date as receiver's log, False otherwise
@@ -278,7 +278,7 @@ class Raft():
 
     # To Update bitmap, nextCommit e maxCommit
     def update(self) -> None:
-        if sum(self.bitmap) >= (self.node_count + 1) // 2:
+        if sum(self.bitmap) >= (self.node_count + 2) // 2:
             self.maxCommit = self.nextCommit
             
             # When updating maxCommit, we also update commitIndex

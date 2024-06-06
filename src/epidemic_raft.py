@@ -197,6 +197,7 @@ class Raft():
                 self.heartbeat_thread()         # Send a heartbeat to its followers
                 self.cancel_timeout_check()     # Leader doesn't timeout election timer 
             case RaftRole.CANDIDATE:
+                self.leader = -1
                 self.start_election()
                 self.start_timeout_check()
                 self.cancel_heartbeats()
@@ -256,7 +257,7 @@ class Raft():
             self.votedForMe.add(msg.src)
             
         # When the candidate receives votes from a majority of the servers, it becomes the leader
-        if len(self.votedForMe) >= (self.node_count + 1) // 2:
+        if len(self.votedForMe) >= (self.node_count + 2) // 2:
             self.change_role(RaftRole.LEADER)
 
     # True if candidate's log is at least as up-to-date as receiver's log, False otherwise
@@ -298,7 +299,7 @@ class Raft():
         
         # Message from an outdated leader -> ignore
         if msg.body.term < self.currentTerm:
-            send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
+            send(self.node_id, msg.body.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
         
         # If message is epidemic gossip and the round is outdated, ignore
@@ -385,6 +386,8 @@ class Raft():
                 match self.log[self.lastApplied].message.body.type:
                     case 'write':
                         self.write(self.log[self.lastApplied].message)
+                    #case 'read':
+                    #    self.read(self.log[self.lastApplied].message)
                     case 'cas':
                         self.cas(self.log[self.lastApplied].message)
             else:
@@ -410,7 +413,7 @@ class Raft():
                 if self.matchIndex[node] >= mid:
                     count += 1
 
-            if count >= (self.node_count + 1) // 2:
+            if count >= (self.node_count + 2) // 2:
                 left = mid + 1
             else:
                 right = mid
