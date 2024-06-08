@@ -329,9 +329,15 @@ class Raft():
     def append_entries(self, msg: Message) -> None:
         self.check_term(msg.body.term)
         
-        if self.role == RaftRole.CANDIDATE and msg.body.term == self.currentTerm:
+        if self.role == RaftRole.CANDIDATE:
             self.leaderId = msg.body.leaderId
+            self.currentTerm = msg.body.term
             self.change_role(RaftRole.FOLLOWER)
+            
+        # When doesn't know a leader, join new leader
+        if self.role == RaftRole.FOLLOWER and self.role == RaftRole.FOLLOWER:
+            self.leaderId = msg.body.leaderId
+            self.currentTerm = msg.body.term
         
         # Message from an outdated leader -> ignore
         if msg.body.term < self.currentTerm:

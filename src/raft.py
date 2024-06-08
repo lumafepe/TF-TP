@@ -239,7 +239,7 @@ class Raft():
     def append_entries(self, msg: Message):
         self.check_term(msg.body.term)
         
-        if self.role == RaftRole.CANDIDATE and msg.body.term == self.currentTerm:
+        if self.role == RaftRole.CANDIDATE:
             self.change_role(RaftRole.FOLLOWER)
         
         # Message from an outdated leader -> ignore
@@ -322,7 +322,7 @@ class Raft():
         right = len(self.log) 
 
         # Encontrar primeira entrada do termo atual
-        for i in range(0, right + 1):
+        for i in range(0, right):
             if self.log[i].term == self.currentTerm:
                 left = i
                 break
@@ -337,7 +337,7 @@ class Raft():
                 if self.matchIndex[node] >= mid:
                     count += 1
 
-            if count >= (self.node_count + 2) // 2:
+            if count >= (self.node_count) // 2:
                 left = mid + 1
             else:
                 right = mid

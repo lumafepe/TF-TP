@@ -293,17 +293,24 @@ class Raft():
         self.check_term(msg.body.term)
         
         # If is a candidate convert to Follower
-        if self.role == RaftRole.CANDIDATE and msg.body.term == self.currentTerm:
+        if self.role == RaftRole.CANDIDATE:
             self.leaderId = msg.body.leaderId
+            self.currentTerm = msg.body.term
             self.change_role(RaftRole.FOLLOWER)
         
+        # When doesn't know a leader, join new leader
+        if self.role == RaftRole.FOLLOWER and self.leaderId == -1:
+            self.leaderId = msg.body.leaderId
+            self.currentTerm = msg.body.term
+        
         # Message from an outdated leader -> ignore
-        if msg.body.term < self.currentTerm:
+        if msg.body.term < self.currentTerm and self.role == RaftRole.FOLLOWER:
             send(self.node_id, msg.body.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
         
         # If message is epidemic gossip and the round is outdated, ignore
         if msg.body.leaderRound <= self.roundLC and not msg.body.isRPC:
+            #self.leaderId = msg.body.leaderId
             return
 
         # Here message has leaderRound > roundLC or is an RPC message
@@ -316,9 +323,6 @@ class Raft():
 
         # If log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm -> reject
         if len(self.log) <= msg.body.prevLogIndex or self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm:
-            logging.debug(self.log[msg.body.prevLogIndex].term != msg.body.prevLogTerm)
-            logging.debug("Log: %s", self.log)
-            logging.debug("Rejecting AppendEntriesRPC")
             send(self.node_id, self.leaderId, type='AppendEntriesRPCReply', term = self.currentTerm, success = False, lastLogIndex=len(self.log) - 1)
             return
         
@@ -398,7 +402,7 @@ class Raft():
         right = len(self.log) 
 
         # Encontrar primeira entrada do termo atual
-        for i in range(0, right + 1):
+        for i in range(0, right):
             if self.log[i].term == self.currentTerm:
                 left = i
                 break
@@ -413,7 +417,7 @@ class Raft():
                 if self.matchIndex[node] >= mid:
                     count += 1
 
-            if count >= (self.node_count + 2) // 2:
+            if count >= (self.node_count) // 2:
                 left = mid + 1
             else:
                 right = mid
