@@ -5,6 +5,7 @@ Typical usage example:
   send("n1", self.node_id, type='echo', content='hello world')
   reply(msg)
 """
+
 import logging
 from sys import stdin
 from json import loads, dumps
@@ -17,6 +18,7 @@ msg_id = 0
 
 Body: TypeAlias = dict[str, Any]
 
+
 @dataclass
 class Message:
     """
@@ -27,6 +29,7 @@ class Message:
        dest:  The node which the message was sent to
        body:  The body of the message
     """
+
     src: str
     dest: str
     body: Body
@@ -35,16 +38,20 @@ class Message:
 def send(src: str, dest: str, **body: object):
     """
     Sends a given message.
-    
+
     Arguments:
         src:  The node which is sending the message
         dest: The node the message will be sent to
         body: The body of the message (excluding 'msg_id')
     """
     global msg_id
-    data = dumps(sn(dest=dest, src=src, body=sn(msg_id=(msg_id:=msg_id+1), **body)), default=vars)
+    data = dumps(
+        sn(dest=dest, src=src, body=sn(msg_id=(msg_id := msg_id + 1), **body)),
+        default=vars,
+    )
     logging.debug("sending %s", data)
     print(data, flush=True)
+
 
 def reply(request: Message, **body: object) -> None:
     """
@@ -60,6 +67,7 @@ def reply(request: Message, **body: object) -> None:
     """
     send(request.dest, request.src, in_reply_to=request.body.msg_id, **body)
 
+
 def receiveAll() -> AsyncIterable[Message]:
     """
     Receives all incoming messages until stdin closes.
@@ -70,4 +78,3 @@ def receiveAll() -> AsyncIterable[Message]:
     while data := stdin.readline():
         logging.debug("received %s", data.strip())
         yield loads(data, object_hook=lambda x: sn(**x))
-    

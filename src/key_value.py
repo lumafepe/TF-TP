@@ -8,7 +8,9 @@ Typical usage example:
 from log import Log
 from state_machine import StateMachine
 import logging
+
 logging.getLogger().setLevel(logging.DEBUG)
+
 
 class KVStore(StateMachine):
     """A simple key value store.
@@ -25,8 +27,7 @@ class KVStore(StateMachine):
     """
 
     def __init__(self) -> None:
-        """Initializes the key value store to be empty.
-        """
+        """Initializes the key value store to be empty."""
         self.store = {}
 
     def read(self, key: object) -> object | None:
@@ -39,7 +40,7 @@ class KVStore(StateMachine):
           The value of the given key.
         """
         return self.store.get(key)
-    
+
     def write(self, key: object, value: object) -> None:
         """Writes a value to a given key.
 
@@ -68,12 +69,11 @@ class KVStore(StateMachine):
 
         if original is None:
             return None
-        
+
         if original == _from:
             self.store[key] = to
 
         return original == _from
-
 
     def apply(self, log: Log) -> None:
         """Applies a log entry to a key value store.

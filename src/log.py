@@ -12,6 +12,7 @@ Typical usage example:
 from types import SimpleNamespace
 from ms import Message
 
+
 class Log:
     """A class representing log entries of the Raft Algorithm.
 
@@ -25,6 +26,7 @@ class Log:
         data: A dictionary containing the information specifying
         the log
     """
+
     def __init__(self, message: Message | None, term: int, id: int) -> None:
         """Initializes a log entry from a Maelstrom message, current term and
         id.
@@ -80,7 +82,7 @@ class Log:
         """Checks for equality against another log.
 
         Two logs are said to be equal if their term, id, and data content are equal.
-        
+
 
         Args:
           other: The other to check for equality against.
@@ -88,7 +90,12 @@ class Log:
         Returns:
           A bool indicating if the logs are equal
         """
-        return type(self) == type(other) and self.data == other.data and self.term == other.term and self.id == other.id
+        return (
+            type(self) == type(other)
+            and self.data == other.data
+            and self.term == other.term
+            and self.id == other.id
+        )
 
     def __str__(self) -> str:
         """Converts a log to a string for debug purposes.

@@ -9,13 +9,15 @@ Typical usage example:
 from abc import ABC, abstractmethod
 from log import Log
 
+
 class StateMachine(ABC):
-    """ An abstract state machine.
+    """An abstract state machine.
 
     Raft replicates a state machine across different processes. In order to be usable
     by the algorithm, a class must inherit from this StateMachine and define the required
     methods.
     """
+
     @abstractmethod
     def __init__(self) -> None:
         pass
