@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+"""
+Maelstrom implementation of the base Raft algorithm
+"""
+
 import logging
 from key_value import KVStore
 from threading import Thread
@@ -11,7 +15,9 @@ from random import uniform
 from queue import Queue
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.DEBUG)
+
+# Default logging level
+logging.getLogger().setLevel(logging.INFO)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -106,7 +112,7 @@ class Raft():
     def fromClient(self, msg: Message) -> None:
         new_entry_index = len(self.log) # index of the new entry
         
-        # When we are the leader
+        # When we are the leader, append entry to log
         if self.role == RaftRole.LEADER:
             self.log.append(Log(msg, self.currentTerm, new_entry_index))
             
@@ -117,7 +123,7 @@ class Raft():
                     send(self.node_id, node, type='AppendEntriesRPC', ni=self.nextIndex[node], term = self.currentTerm, leaderId=self.node_id, prevLogIndex=self.nextIndex[node] - 1, prevLogTerm=self.log[self.nextIndex[node] - 1].term, entries=self.log[self.nextIndex[node]:],leaderCommit=self.commitIndex)
             """
         
-        # When we are not the leader, but we know a leader
+        # When we are not the leader, but we know a leader, forward the message to them
         elif self.leaderId != -1:
             send(self.node_id, self.leaderId, type="Forward", og=msg)
         
@@ -398,15 +404,19 @@ def main():
     logging.debug("End")
 
 
-hello_thread = Thread(target=process)
-hello_thread.start()
-hello_thread2 = Thread(target=election_probe)
-hello_thread2.start()
-hello_thread3 = Thread(target=heartbeat_probe)
-hello_thread3.start()
-hello_thread4 = Thread(target=main)
-hello_thread4.start()
 
-hello_thread4.join()
+# Spawn all threads
+main_thread = Thread(target=process)
+main_thread.start()
+election_thread = Thread(target=election_probe)
+election_thread.start()
+heartbeat_thread = Thread(target=heartbeat_probe)
+heartbeat_thread.start()
+message_thread = Thread(target=main)
+message_thread.start()
 
+# Wait until all messages have been received
+message_thread.join()
+
+# Mark the queue as done
 queue.task_done()

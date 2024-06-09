@@ -12,7 +12,7 @@ from queue import Queue
 from math import log2
 from ms import receiveAll, reply, send, Message
 
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().setLevel(logging.INFO)
 
 class RaftRole(Enum):
     LEADER = 1
@@ -487,16 +487,18 @@ def main():
         queue.put(msg)
 
 
-hello_thread = Thread(target=process)
-hello_thread.start()
-hello_thread2 = Thread(target=election_probe)
-hello_thread2.start()
-hello_thread3 = Thread(target=heartbeat_probe)
-hello_thread3.start()
-hello_thread4 = Thread(target=main)
-hello_thread4.start()
+# Spawn all threads
+main_thread = Thread(target=process)
+main_thread.start()
+election_thread = Thread(target=election_probe)
+election_thread.start()
+heartbeat_thread = Thread(target=heartbeat_probe)
+heartbeat_thread.start()
+message_thread = Thread(target=main)
+message_thread.start()
 
-hello_thread4.join()
+# Wait until all messages have been received
+message_thread.join()
 
+# Mark the queue as done
 queue.task_done()
-
