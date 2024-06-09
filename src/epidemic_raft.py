@@ -120,11 +120,7 @@ class Raft():
         
         # When we are the leader
         if self.node_id == self.leaderId:
-            match msg.body.type:
-                case 'read':
-                    self.read(msg)
-                case _:
-                    self.log.append(Log(msg, self.currentTerm, new_entry_index))
+            self.log.append(Log(msg, self.currentTerm, new_entry_index))
    
             # Could also send immediate append entries to followers to reduce latency
             """
@@ -390,8 +386,8 @@ class Raft():
                 match self.log[self.lastApplied].message.body.type:
                     case 'write':
                         self.write(self.log[self.lastApplied].message)
-                    #case 'read':
-                    #    self.read(self.log[self.lastApplied].message)
+                    case 'read':
+                        self.read(self.log[self.lastApplied].message)
                     case 'cas':
                         self.cas(self.log[self.lastApplied].message)
             else:
@@ -489,4 +485,3 @@ hello_thread4.start()
 hello_thread4.join()
 
 queue.task_done()
-

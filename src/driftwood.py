@@ -335,7 +335,7 @@ class Raft():
             self.change_role(RaftRole.FOLLOWER)
             
         # When doesn't know a leader, join new leader
-        if self.role == RaftRole.FOLLOWER and self.role == RaftRole.FOLLOWER:
+        if self.role == RaftRole.FOLLOWER and self.leaderId == -1:
             self.leaderId = msg.body.leaderId
             self.currentTerm = msg.body.term
         
